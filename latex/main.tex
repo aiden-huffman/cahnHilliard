@@ -1,0 +1,54 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx} % Required for inserting images
+
+\usepackage{amsmath, amssymb}
+\usepackage{diffcoeff, cancel}
+
+\title{Cahn-Hilliard with Deal.II}
+\author{Aiden Huffman}
+\date{October 2023}
+
+\begin{document}
+
+\maketitle
+
+For our purposes, the Cahn-Hilliard equation is described by the following
+partial differential equation
+\begin{align}
+    \diffp{\phi}{t} &= \nabla\cdot((1-\phi^2)\nabla\eta)\\
+    \eta(\phi) &= F'(\phi)-\epsilon^2 \nabla^2 \phi\\
+\end{align}
+where
+\begin{equation}
+    F(\phi) = \frac{1}{4}(1-\phi^2)^2
+\end{equation}
+so that
+\begin{equation}
+    F'(\phi) = -\phi(1-\phi^2)
+\end{equation}
+We'll begin by solving this in the simplest way possible. In particular, a first
+order forward Euler method.
+\begin{align}
+\frac{c^{n+1}-c^{n}}{\Delta t} &= \nabla\cdot((1-(c^n)^2)\nabla\eta^n))\\
+\eta^n &= -c^n(1-(c^n)^2) - \epsilon^2 \nabla^2 c^n
+\end{align}
+Multiplying through by the test function, we have
+\begin{align}
+    (\phi, c^{n+1})_\Omega &= (\phi, c^n)_\Omega
+                            + \Delta t (\nabla \phi, (1-(c^n)^2)\nabla(\eta^n))_\Omega\\
+    (\phi, \eta^n)_\Omega &= -(\phi, c^n(1-(c^n)^2))_\Omega 
+                            - \epsilon^2 (\nabla\phi, \nabla c^n)_\Omega
+\end{align}
+We will impose periodic conditions on both boundaries. As a consequence, there
+are no boundaries to integrate over. Since we are time stepping explicitly, we
+can solve for $\eta^n$ independent of $c^{n+1}$ and use the previous solution
+to construct the necessary values, after some work, we have:
+\begin{align}
+    MC^{n+1} &= MC^n + \Delta t (\nabla \phi_i, F(c^n, \eta^n))\\
+    M\eta^n &= -\epsilon^2 A C^n - (\phi, G(c^n))
+\end{align}
+We could implicitly step the laplace term, however because $\epsilon^2$ is
+small, this should generally not be super stiff. It would also couple the system
+which may make it more difficult to solve for the next timestep.
+\end{document}

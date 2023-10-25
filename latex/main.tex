@@ -16,39 +16,55 @@
 For our purposes, the Cahn-Hilliard equation is described by the following
 partial differential equation
 \begin{align}
-    \diffp{\phi}{t} &= \nabla\cdot((1-\phi^2)\nabla\eta)\\
+    \diffp{\phi}{t} &= \nabla\cdot(M(\phi)\nabla\eta)\\
     \eta(\phi) &= F'(\phi)-\epsilon^2 \nabla^2 \phi\\
 \end{align}
 where
 \begin{equation}
-    F(\phi) = \frac{1}{4}(1-\phi^2)^2
+    F(\phi) = \frac{1}{4}(\phi^2-1)^2,\qquad M(\phi) = 1-\phi^2
 \end{equation}
 so that
-\begin{equation}
-    F'(\phi) = -\phi(1-\phi^2)
-\end{equation}
+\begin{align}
+    \diffp{\phi}{t} &= \nabla\cdot((1-\phi^2)\nabla\eta)\\
+    \eta(\phi) &= \phi(\phi^2-1) - \epsilon^2\nabla^2\phi 
+\end{align}
 We'll begin by solving this in the simplest way possible. In particular, a first
-order forward Euler method.
+order forward Euler method. Before this, we will replace the $\phi$'s in the
+system with $c$ since we frequently use $\phi$ to represent functions in the
+trial space. As a consequence, our system takes the form:
 \begin{align}
 \frac{c^{n+1}-c^{n}}{\Delta t} &= \nabla\cdot((1-(c^n)^2)\nabla\eta^n))\\
-\eta^n &= -c^n(1-(c^n)^2) - \epsilon^2 \nabla^2 c^n
+\eta^n &= c^n((c^n)^2-1) - \epsilon^2 \nabla^2 c^n
 \end{align}
-Multiplying through by the test function, we have
+Notice that we can solve for $\eta^n$ before finding $c^{n+1}$ and provides a
+reasonable method for updating the system. Projecting into the test space, we
+have
 \begin{align}
-    (\phi, c^{n+1})_\Omega &= (\phi, c^n)_\Omega
-                            + \Delta t (\nabla \phi, (1-(c^n)^2)\nabla(\eta^n))_\Omega\\
-    (\phi, \eta^n)_\Omega &= -(\phi, c^n(1-(c^n)^2))_\Omega 
-                            - \epsilon^2 (\nabla\phi, \nabla c^n)_\Omega
+    (\phi, c^{n+1})_\Omega  &= (\phi, c^n)_\Omega
+                            + \Delta t (
+                                \phi,\,
+                                \nabla\cdot(1-(c^n)^2)\nabla(\eta^n)
+                            )_\Omega,\\
+    (\phi, \eta^n)_\Omega   &= (\phi, c((c^n)^2-1)))_\Omega 
+                            - \epsilon^2(\phi,\nabla^2 c^n).
 \end{align}
-We will impose periodic conditions on both boundaries. As a consequence, there
-are no boundaries to integrate over. Since we are time stepping explicitly, we
-can solve for $\eta^n$ independent of $c^{n+1}$ and use the previous solution
-to construct the necessary values, after some work, we have:
+After integrating by parts, and assuming periodic boundary conditions
 \begin{align}
-    MC^{n+1} &= MC^n + \Delta t (\nabla \phi_i, F(c^n, \eta^n))\\
-    M\eta^n &= -\epsilon^2 A C^n - (\phi, G(c^n))
+    (\phi, c^{n+1})_\Omega  &= (\phi, c^n)_\Omega
+                            - \Delta t (
+                                \nabla \phi,\,
+                                (1-(c^n)^2)\nabla(\eta^n)
+                            )_\Omega,\\
+    (\phi, \eta^n)_\Omega   &= (\phi, c((c^n)^2-1)))_\Omega 
+                            + \epsilon^2(\nabla \phi,\nabla c^n).
 \end{align}
-We could implicitly step the laplace term, however because $\epsilon^2$ is
-small, this should generally not be super stiff. It would also couple the system
-which may make it more difficult to solve for the next timestep.
+If we assume that the solution lives in the trial space, and take some finite
+basis of the function space we can replace $(\phi, c^{n})$ with a mass matrix,
+$(\nabla \phi, \nabla c^n)$ with a laplace matrix and perform similar
+substitutions for $\eta$. If $M$ and $A$ represent the two matrices, the system
+is approximately governed by
+\begin{align}
+    MC^{n+1} &= MC^n - \Delta t (\nabla \phi_i, F(c^n, \eta^n))\\
+    M\eta^n &= \epsilon^2 A C^n + (\phi, G(c^n))
+\end{align}
 \end{document}

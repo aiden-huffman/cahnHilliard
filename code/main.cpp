@@ -144,7 +144,7 @@ namespace cahnHilliard {
         std::cout << "Neighbours updated to reflect periodicity" << std::endl;
     
         std::cout << "Refining grid" << std::endl;
-        triangulation.refine_global(6);
+        triangulation.refine_global(8);
 
         std::cout   << "Mesh generated...\n"
                     << "Active cells: " << triangulation.n_active_cells()
@@ -239,7 +239,7 @@ namespace cahnHilliard {
     template<int dim> class InitialValuesC : public Function<dim>
     {
         public:
-            InitialValuesC();
+            InitialValuesC(double eps);
             virtual double value(
                 const Point<dim> &p,
                 const unsigned int component = 0
@@ -249,11 +249,14 @@ namespace cahnHilliard {
 
             mutable std::default_random_engine  generator;
             mutable std::normal_distribution<double>    distribution;
+
+            double eps;
     };
 
-    template<int dim> InitialValuesC<dim>::InitialValuesC()
+    template<int dim> InitialValuesC<dim>::InitialValuesC(double eps)
         : generator()
-        , distribution(0,0.1)
+        , distribution(0,0.25)
+        , eps(eps)
     {}
     
     // Perturb around 0 to observe "decomposition"
@@ -262,7 +265,9 @@ namespace cahnHilliard {
         const unsigned int i /*component*/
     ) const
     {
-        return this->distribution(this->generator);
+        return std::tanh(
+            (p.square() - 0.25) / (std::sqrt(2) * this->eps)
+        );
     }
 
     template<int dim> void CahnHilliardEquation<dim> :: initializeValues()
@@ -273,7 +278,7 @@ namespace cahnHilliard {
         VectorTools::project(this->dofHandler,
                              this->constraints,
                              QGauss<dim>(fe.degree + 1),
-                             InitialValuesC<dim>(),
+                             InitialValuesC<dim>(this->eps),
                              this->oldSolutionC);
 
         double* maxC = std::max_element(oldSolutionC.begin(),
@@ -346,7 +351,7 @@ namespace cahnHilliard {
 
         dataOut.attach_dof_handler(this->dofHandler);
         dataOut.add_data_vector(this->solutionC, "C");
-
+        dataOut.add_data_vector(this->solutionEta, "Eta");
         dataOut.build_patches();
 
         const std::string filename = ("data/solution-" 
@@ -389,11 +394,10 @@ namespace cahnHilliard {
             std::cout   << "\rCurrent time: " << this->time << std::flush; 
             std::cout   << "    Constructing RHS for eta^n" << std::endl;
 
-            // temp = AC^n
-            laplaceMatrix.vmult(temp, this->oldSolutionC);
+            // systemRightHandSideEta = AC^n
+            laplaceMatrix.vmult(systemRightHandSideEta, this->oldSolutionC);
 
-            // systemRightHandSideEta = epsilon^2 * AC^n
-            this->systemRightHandSideEta.add(pow(this->eps,2), temp);
+            this->systemRightHandSideEta *= pow(this->eps,2);
 
             for(const auto &cell : this->dofHandler.active_cell_iterators())
             {
@@ -417,8 +421,8 @@ namespace cahnHilliard {
                         // systemRightHandSide -= (phi_i, F(C^n))
                         // where F(C^n) = ( C^n (1 - (C^n)^2) )
                         this->systemRightHandSideEta(local_dof_indices[i])
-                            -= feValues.shape_value(i, qIndex) 
-                                * (Cx * (1 - pow(Cx,2)))
+                            += feValues.shape_value(i, qIndex) 
+                                * (Cx * (pow(Cx,2) - 1))
                                 * feValues.JxW(qIndex);
                     }
                 }
@@ -444,12 +448,12 @@ namespace cahnHilliard {
                 for(const unsigned int qIndex : feValues.quadrature_point_indices())
                 {
                     double Cx       = cellValuesC[qIndex];
-                    auto GradEtaX = cellGradEta[qIndex];
+                    auto GradEtaX   = cellGradEta[qIndex];
 
                     for(const unsigned int i : feValues.dof_indices())
                     {
                         this->systemRightHandSideC(local_dof_indices[i])
-                            += (feValues.shape_grad(i, qIndex)
+                            -= (feValues.shape_grad(i, qIndex)
                                 * (1-pow(Cx,2))
                                 * GradEtaX) * feValues.JxW(qIndex) * this->timeStep;
                                 
@@ -460,19 +464,29 @@ namespace cahnHilliard {
             std::cout << "    Solving for c^{n+1}" << std::endl;
             solveC();
  
-            double maxC = *std::max_element(this->solutionC.begin(),
-                                            this->solutionC.end());
-            double minC = *std::min_element(this->solutionC.begin(),
-                                            this->solutionC.end());
  
-            std::cout   << "    C Range: (" 
-                            << minC  << ", " 
-                            << maxC 
-                        << ")" << std::endl;
 
             this->oldSolutionC = this->solutionC;
 
             if (this->timestepNumber % 10 == 0){
+
+                double maxC = *std::max_element(this->solutionC.begin(),
+                                                this->solutionC.end());
+                double minC = *std::min_element(this->solutionC.begin(),
+                                                this->solutionC.end());
+                double maxEta = *std::max_element(this->solutionEta.begin(),
+                                                  this->solutionEta.end());
+                double minEta = *std::min_element(this->solutionEta.begin(),
+                                                  this->solutionEta.end());
+
+                std::cout   << "    C Range: (" 
+                                << minC  << ", " 
+                                << maxC 
+                            << ")" << std::endl;
+                std::cout   << "    Eta Range: (" 
+                                << minEta  << ", " 
+                                << maxEta 
+                            << ")" << std::endl;
                 outputResults();
             }
 

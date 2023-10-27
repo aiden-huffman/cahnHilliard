@@ -88,7 +88,7 @@ namespace cahnHilliard {
                                 double totalSimTime)
             : fe(1)
             , dofHandler(triangulation)
-            , timeStep(1. / 512.)
+            , timeStep(1. / 256.)
             , time(timeStep)
             , timestepNumber(1)
     {
@@ -162,11 +162,33 @@ namespace cahnHilliard {
         std::cout   << "Building sparsity pattern..."
                     << std::endl;
 
+        std::vector<GridTools::PeriodicFacePair<
+            typename DoFHandler<dim>::cell_iterator>
+        > periodicity_vectorX;
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename DoFHandler<dim>::cell_iterator>
+        > periodicity_vectorY;
+
+        GridTools::collect_periodic_faces(this->dofHandler,
+                                          0,1,0,periodicity_vectorX);
+        GridTools::collect_periodic_faces(this->dofHandler,
+                                          2,3,1,periodicity_vectorY);
+
+        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
+                                                        this->constraints);
+        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
+                                                        this->constraints);
+
+        constraints.close();
+
         DynamicSparsityPattern dsp(
             dofHandler.n_dofs(),
             dofHandler.n_dofs()
         );
-        DoFTools::make_sparsity_pattern(dofHandler, dsp);
+        DoFTools::make_sparsity_pattern(dofHandler,
+                                        dsp,
+                                        this->constraints);
         sparsityPattern.copy_from(dsp);
 
         std::cout   << "Reinitializing matices based on new pattern..."
@@ -207,25 +229,6 @@ namespace cahnHilliard {
         std::cout   << "Building constraints from periodicity..."
                     << std::endl;
 
-        std::vector<GridTools::PeriodicFacePair<
-            typename DoFHandler<dim>::cell_iterator>
-        > periodicity_vectorX;
-
-        std::vector<GridTools::PeriodicFacePair<
-            typename DoFHandler<dim>::cell_iterator>
-        > periodicity_vectorY;
-
-        GridTools::collect_periodic_faces(this->dofHandler,
-                                          0,1,0,periodicity_vectorX);
-        GridTools::collect_periodic_faces(this->dofHandler,
-                                          2,3,1,periodicity_vectorY);
-
-        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
-                                                        this->constraints);
-        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
-                                                        this->constraints);
-
-        constraints.close();
 
         std::cout   << "Periodicity constraints added"
                     << std::endl;
@@ -259,27 +262,27 @@ namespace cahnHilliard {
         , eps(eps)
     {}
     
-    // Perturb around 0 to observe "decomposition"
     template<int dim> double InitialValuesC<dim> :: value(
         const Point<dim> &p,
         const unsigned int i /*component*/
     ) const
     {
         return std::tanh(
-            (p.square() - 0.25) / (std::sqrt(2) * this->eps)
-        );
+            (p.norm()-0.25) / (std::sqrt(2)*this->eps)
+        ); 
     }
 
     template<int dim> void CahnHilliardEquation<dim> :: initializeValues()
     {   
        
-        std::cout   << "Initializing values for c" << std::endl;
+        std::cout   << "Initializing values for C" << std::endl;
 
         VectorTools::project(this->dofHandler,
                              this->constraints,
                              QGauss<dim>(fe.degree + 1),
                              InitialValuesC<dim>(this->eps),
                              this->oldSolutionC);
+        this->constraints.distribute(this->oldSolutionC);
 
         double* maxC = std::max_element(oldSolutionC.begin(),
                                         oldSolutionC.end());
@@ -304,16 +307,17 @@ namespace cahnHilliard {
                                     );
         SolverCG<Vector<double>>    cg(solverControl);
 
+        this->constraints.condense(this->massMatrix,
+                                   this->systemRightHandSideEta);
         cg.solve(
             this->massMatrix,
             this->solutionEta,
             this->systemRightHandSideEta,
             PreconditionIdentity()
         );
+        this->constraints.distribute(this->solutionEta);
 
-        this->constraints.distribute(solutionEta);
-
-        std::cout   << "    Q solved: "
+        std::cout   << "    Eta solved: "
                     << solverControl.last_step()
                     << " CG iterations."
                     << std::endl;
@@ -324,20 +328,21 @@ namespace cahnHilliard {
     {   
         SolverControl               solverControl(
                                         1000,
-                                        1e-8 * systemRightHandSideEta.l2_norm()
+                                        1e-8 * systemRightHandSideC.l2_norm()
                                     );
         SolverCG<Vector<double>>    cg(solverControl);
 
+        this->constraints.condense(this->massMatrix,
+                                   this->systemRightHandSideC);
         cg.solve(
             this->massMatrix,
             this->solutionC,
             this->systemRightHandSideC,
             PreconditionIdentity()
         );
+        this->constraints.distribute(this->solutionC);
 
-        this->constraints.distribute(solutionEta);
-
-        std::cout   << "    Q solved: "
+        std::cout   << "    C solved: "
                     << solverControl.last_step()
                     << " CG iterations."
                     << std::endl;
@@ -468,7 +473,7 @@ namespace cahnHilliard {
 
             this->oldSolutionC = this->solutionC;
 
-            if (this->timestepNumber % 10 == 0){
+            if (this->timestepNumber % 5 == 0){
 
                 double maxC = *std::max_element(this->solutionC.begin(),
                                                 this->solutionC.end());
@@ -502,9 +507,9 @@ int main(){
 
     std::unordered_map<std::string, double> params;
 
-    params["eps"] = 1.e-2;
+    params["eps"] = 1e-2;
 
-    double totalSimTime = 10;
+    double totalSimTime = 1000;
 
     cahnHilliard::CahnHilliardEquation<2> cahnHilliard(params, totalSimTime);
     cahnHilliard.run();

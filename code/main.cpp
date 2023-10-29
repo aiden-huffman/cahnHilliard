@@ -190,6 +190,7 @@ namespace cahnHilliard {
                                         dsp,
                                         this->constraints);
         sparsityPattern.copy_from(dsp);
+        sparsityPattern.compress();
 
         std::cout   << "Reinitializing matices based on new pattern..."
                     << std::endl;
@@ -509,7 +510,7 @@ int main(){
 
     params["eps"] = 1e-2;
 
-    double totalSimTime = 1000;
+    double totalSimTime = 10;
 
     cahnHilliard::CahnHilliardEquation<2> cahnHilliard(params, totalSimTime);
     cahnHilliard.run();

@@ -5,13 +5,12 @@
 #include <deal.II/base/types.h>
 #include <deal.II/base/function.h>
 
+#include <deal.II/fe/component_mask.h>
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/grid/grid_tools.h>
+#include <deal.II/grid/grid_refinement.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
 #include <deal.II/lac/sparsity_pattern.h>
-#include <deal.II/numerics/vector_tools.h>
-#include <deal.II/numerics/matrix_tools.h>
-#include <deal.II/numerics/data_out.h>
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
@@ -28,6 +27,13 @@
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/lac/affine_constraints.h>
+
+#include <deal.II/numerics/vector_tools.h>
+#include <deal.II/numerics/matrix_tools.h>
+#include <deal.II/numerics/data_out.h>
+#include <deal.II/numerics/error_estimator.h>
+#include <deal.II/numerics/solution_transfer.h>
+
 
 #include <random>
 #include <unordered_map>
@@ -52,6 +58,8 @@ namespace cahnHilliard {
         void constructRightHandC();
         void solveC();
         void solveEta();
+        void performRefinement();
+        void performRefinementEta();
         void outputResults() const;
 
         Triangulation<dim>  triangulation;
@@ -80,6 +88,9 @@ namespace cahnHilliard {
         unsigned int    timestepNumber;
         double          totalSimTime;
 
+        unsigned int maxRefine;
+        unsigned int minRefine;
+
         double eps;
     };
 
@@ -88,9 +99,11 @@ namespace cahnHilliard {
                                 double totalSimTime)
             : fe(1)
             , dofHandler(triangulation)
-            , timeStep(1. / 256.)
+            , timeStep(1. / 1024.)
             , time(timeStep)
             , timestepNumber(1)
+            , maxRefine(12)
+            , minRefine(4)
     {
         this->setupSystem(params,
                           totalSimTime);
@@ -144,7 +157,7 @@ namespace cahnHilliard {
         std::cout << "Neighbours updated to reflect periodicity" << std::endl;
     
         std::cout << "Refining grid" << std::endl;
-        triangulation.refine_global(8);
+        triangulation.refine_global(6);
 
         std::cout   << "Mesh generated...\n"
                     << "Active cells: " << triangulation.n_active_cells()
@@ -278,6 +291,19 @@ namespace cahnHilliard {
        
         std::cout   << "Initializing values for C" << std::endl;
 
+
+        for(unsigned int i = 0; i < 20; i++){
+
+            VectorTools::project(this->dofHandler,
+                                 this->constraints,
+                                 QGauss<dim>(fe.degree + 1),
+                                 InitialValuesC<dim>(this->eps),
+                                 this->oldSolutionC);
+            this->constraints.distribute(this->oldSolutionC);
+            this->performRefinement();
+
+        }
+
         VectorTools::project(this->dofHandler,
                              this->constraints,
                              QGauss<dim>(fe.degree + 1),
@@ -298,12 +324,100 @@ namespace cahnHilliard {
                     << std::endl;
 
     }
+    
+    template<int dim> void CahnHilliardEquation<dim> :: performRefinement()
+    {
+        this->constraints.clear();
+        Vector<float> estimatedError(triangulation.n_active_cells());
+
+        KellyErrorEstimator<dim>::estimate(
+            this->dofHandler,
+            QGauss<dim-1>(this->fe.degree + 1),
+            std::map<types::boundary_id, const Function<dim> *>(),
+            this->oldSolutionC,
+            estimatedError);
+
+        GridRefinement::refine_and_coarsen_optimize(triangulation, estimatedError);
+
+        if(this->triangulation.n_levels() > this->maxRefine){
+
+            for (const auto &cell : this->triangulation.active_cell_iterators_on_level(this->maxRefine)){
+                cell->clear_refine_flag();
+            }
+        }
+        
+        for(const auto &cell : this->triangulation.active_cell_iterators_on_level(this->minRefine)){
+            cell->clear_coarsen_flag();
+        }
+
+        SolutionTransfer<dim> solutionTrans(this->dofHandler);
+
+        Vector<double> unrefinedSolution;
+        unrefinedSolution = this->oldSolutionC;
+
+        triangulation.prepare_coarsening_and_refinement();
+        solutionTrans.prepare_for_coarsening_and_refinement(unrefinedSolution);
+
+        this->triangulation.execute_coarsening_and_refinement();
+        this->dofHandler.distribute_dofs(fe);
+
+        // Constraints
+        std::vector<GridTools::PeriodicFacePair<
+            typename DoFHandler<dim>::cell_iterator>
+        > periodicity_vectorX;
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename DoFHandler<dim>::cell_iterator>
+        > periodicity_vectorY;
+
+        GridTools::collect_periodic_faces(this->dofHandler,
+                                          0,1,0,periodicity_vectorX);
+        GridTools::collect_periodic_faces(this->dofHandler,
+                                          2,3,1,periodicity_vectorY);
+
+        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
+                                                        this->constraints);
+        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
+                                                        this->constraints);
+        DoFTools::make_hanging_node_constraints(this->dofHandler,
+                                                this->constraints);
+        this->constraints.close();
+
+
+        DynamicSparsityPattern dsp(this->dofHandler.n_dofs());
+        DoFTools::make_sparsity_pattern(this->dofHandler, dsp,
+                                        this->constraints);
+        this->sparsityPattern.copy_from(dsp);
+
+        this->massMatrix.reinit(this->sparsityPattern);
+        this->laplaceMatrix.reinit(this->sparsityPattern);
+
+        MatrixCreator::create_mass_matrix(
+            dofHandler,
+            QGauss<dim>(fe.degree+1),
+            massMatrix
+        );
+
+        MatrixCreator::create_laplace_matrix(
+            dofHandler,
+            QGauss<dim>(fe.degree+1),
+            massMatrix
+        );
+
+        this->solutionC.reinit(this->dofHandler.n_dofs());
+        this->oldSolutionC.reinit(this->dofHandler.n_dofs());
+        this->solutionEta.reinit(this->dofHandler.n_dofs());
+        this->systemRightHandSideEta.reinit(this->dofHandler.n_dofs());
+        this->systemRightHandSideC.reinit(this->dofHandler.n_dofs());
+
+        solutionTrans.interpolate(unrefinedSolution, this->oldSolutionC);
+    }
 
     template<int dim> void CahnHilliardEquation<dim>
         :: solveEta()
     {   
         SolverControl               solverControl(
-                                        1000,
+                                        10000,
                                         1e-8 * systemRightHandSideEta.l2_norm()
                                     );
         SolverCG<Vector<double>>    cg(solverControl);
@@ -322,6 +436,106 @@ namespace cahnHilliard {
                     << solverControl.last_step()
                     << " CG iterations."
                     << std::endl;
+    }
+    
+    template<int dim> void CahnHilliardEquation<dim> :: performRefinementEta()
+    {
+        this->constraints.clear();
+        Vector<float> estimatedError(triangulation.n_active_cells());
+
+        KellyErrorEstimator<dim>::estimate(
+            this->dofHandler,
+            QGauss<dim-1>(this->fe.degree + 1),
+            std::map<types::boundary_id, const Function<dim> *>(),
+            this->solutionEta,
+            estimatedError,
+            ComponentMask(),
+            nullptr,
+            numbers::invalid_unsigned_int,
+            numbers::invalid_subdomain_id,
+            numbers::invalid_material_id,
+            KellyErrorEstimator<dim>::face_diameter_over_twice_max_degree);
+
+        GridRefinement::refine_and_coarsen_optimize(triangulation, estimatedError);
+
+        if(this->triangulation.n_levels() > this->maxRefine){
+
+            for (const auto &cell : this->triangulation.active_cell_iterators_on_level(this->maxRefine)){
+                cell->clear_refine_flag();
+            }
+        }
+        
+        for(const auto &cell : this->triangulation.active_cell_iterators_on_level(this->minRefine)){
+            cell->clear_coarsen_flag();
+        }
+
+        SolutionTransfer<dim> solutionTransEta(this->dofHandler);
+        SolutionTransfer<dim> solutionTransC(this->dofHandler);
+
+        Vector<double> unrefinedSolutionEta;
+        Vector<double> unrefinedSolutionC;
+        unrefinedSolutionEta    = this->solutionEta;
+        unrefinedSolutionC      = this->solutionC;
+
+        triangulation.prepare_coarsening_and_refinement();
+        solutionTransEta.prepare_for_coarsening_and_refinement(unrefinedSolutionEta);
+        solutionTransC.prepare_for_coarsening_and_refinement(unrefinedSolutionC);
+
+        this->triangulation.execute_coarsening_and_refinement();
+        this->dofHandler.distribute_dofs(fe);
+
+        // Constraints
+        std::vector<GridTools::PeriodicFacePair<
+            typename DoFHandler<dim>::cell_iterator>
+        > periodicity_vectorX;
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename DoFHandler<dim>::cell_iterator>
+        > periodicity_vectorY;
+
+        GridTools::collect_periodic_faces(this->dofHandler,
+                                          0,1,0,periodicity_vectorX);
+        GridTools::collect_periodic_faces(this->dofHandler,
+                                          2,3,1,periodicity_vectorY);
+
+        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
+                                                        this->constraints);
+        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
+                                                        this->constraints);
+        DoFTools::make_hanging_node_constraints(this->dofHandler,
+                                                this->constraints);
+        this->constraints.close();
+
+
+        DynamicSparsityPattern dsp(this->dofHandler.n_dofs());
+        DoFTools::make_sparsity_pattern(this->dofHandler, dsp,
+                                        this->constraints);
+        this->sparsityPattern.copy_from(dsp);
+
+        this->massMatrix.reinit(this->sparsityPattern);
+        this->laplaceMatrix.reinit(this->sparsityPattern);
+
+        MatrixCreator::create_mass_matrix(
+            dofHandler,
+            QGauss<dim>(fe.degree+1),
+            massMatrix
+        );
+
+        MatrixCreator::create_laplace_matrix(
+            dofHandler,
+            QGauss<dim>(fe.degree+1),
+            massMatrix
+        );
+
+        this->solutionC.reinit(this->dofHandler.n_dofs());
+        this->oldSolutionC.reinit(this->dofHandler.n_dofs());
+        this->solutionEta.reinit(this->dofHandler.n_dofs());
+        this->systemRightHandSideEta.reinit(this->dofHandler.n_dofs());
+        this->systemRightHandSideC.reinit(this->dofHandler.n_dofs());
+
+        solutionTransEta.interpolate(unrefinedSolutionEta, this->solutionEta);
+        solutionTransC.interpolate(unrefinedSolutionC, this->solutionC);
+        this->constraints.distribute(this->solutionEta);
     }
 
     template<int dim> void CahnHilliardEquation<dim>
@@ -470,10 +684,6 @@ namespace cahnHilliard {
             std::cout << "    Solving for c^{n+1}" << std::endl;
             solveC();
  
- 
-
-            this->oldSolutionC = this->solutionC;
-
             if (this->timestepNumber % 5 == 0){
 
                 double maxC = *std::max_element(this->solutionC.begin(),
@@ -494,7 +704,11 @@ namespace cahnHilliard {
                                 << maxEta 
                             << ")" << std::endl;
                 outputResults();
+
+                this->performRefinementEta();
             }
+            
+            this->oldSolutionC = this->solutionC;
 
         }
 

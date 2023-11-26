@@ -21,7 +21,7 @@
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_tools.h>
 
-#include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_gmres.h>
 #include <deal.II/lac/solver_control.h>
 #include <deal.II/lac/vector.h>
 #include <deal.II/lac/sparse_matrix.h>
@@ -97,12 +97,12 @@ namespace cahnHilliard {
     template<int dim> CahnHilliardEquation<dim> 
         :: CahnHilliardEquation(std::unordered_map<std::string, double> params,
                                 double totalSimTime)
-            : fe(1)
+            : fe(2)
             , dofHandler(triangulation)
             , timeStep(1. / 1024.)
             , time(timeStep)
             , timestepNumber(1)
-            , maxRefine(12)
+            , maxRefine(7)
             , minRefine(4)
     {
         this->setupSystem(params,
@@ -225,7 +225,7 @@ namespace cahnHilliard {
         MatrixCreator::create_laplace_matrix(
             dofHandler,
             QGauss<dim>(fe.degree+1),
-            massMatrix
+            laplaceMatrix
         );
 
         std::cout   << "Initializing vectors..."
@@ -292,7 +292,7 @@ namespace cahnHilliard {
         std::cout   << "Initializing values for C" << std::endl;
 
 
-        for(unsigned int i = 0; i < 20; i++){
+        for(unsigned int i = 0; i < 10; i++){
 
             VectorTools::project(this->dofHandler,
                                  this->constraints,
@@ -401,7 +401,7 @@ namespace cahnHilliard {
         MatrixCreator::create_laplace_matrix(
             dofHandler,
             QGauss<dim>(fe.degree+1),
-            massMatrix
+            laplaceMatrix
         );
 
         this->solutionC.reinit(this->dofHandler.n_dofs());
@@ -420,11 +420,11 @@ namespace cahnHilliard {
                                         10000,
                                         1e-8 * systemRightHandSideEta.l2_norm()
                                     );
-        SolverCG<Vector<double>>    cg(solverControl);
+        SolverGMRES<Vector<double>>    gmres(solverControl);
 
         this->constraints.condense(this->massMatrix,
                                    this->systemRightHandSideEta);
-        cg.solve(
+        gmres.solve(
             this->massMatrix,
             this->solutionEta,
             this->systemRightHandSideEta,
@@ -524,7 +524,7 @@ namespace cahnHilliard {
         MatrixCreator::create_laplace_matrix(
             dofHandler,
             QGauss<dim>(fe.degree+1),
-            massMatrix
+            laplaceMatrix
         );
 
         this->solutionC.reinit(this->dofHandler.n_dofs());
@@ -545,11 +545,11 @@ namespace cahnHilliard {
                                         1000,
                                         1e-8 * systemRightHandSideC.l2_norm()
                                     );
-        SolverCG<Vector<double>>    cg(solverControl);
+        SolverGMRES<Vector<double>>    gmres(solverControl);
 
         this->constraints.condense(this->massMatrix,
                                    this->systemRightHandSideC);
-        cg.solve(
+        gmres.solve(
             this->massMatrix,
             this->solutionC,
             this->systemRightHandSideC,
@@ -705,9 +705,9 @@ namespace cahnHilliard {
                             << ")" << std::endl;
                 outputResults();
 
-                this->performRefinementEta();
             }
             
+            this->performRefinementEta();
             this->oldSolutionC = this->solutionC;
 
         }

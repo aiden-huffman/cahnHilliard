@@ -36,469 +36,406 @@
 namespace cahnHilliard {
     using namespace dealii;
 
-    template<int dim> class CahnHilliardEquation
-    {
+template<int dim> class InitialValuesC : public Function<dim>
+{
     public:
-        CahnHilliardEquation(
-            const std::unordered_map<std::string, double>  params,
-            const double totalSimTime);
-        void run();
+        InitialValuesC(double eps);
+        virtual double value(
+            const Point<dim> &p,
+            const unsigned int component = 0
+        ) const override;
 
     private:
-        void setupSystem(const std::unordered_map<std::string, double> params,
-                          const double                                  totalSimTime);
-        void initializeValues();
-        void constructRightHandEta();
-        void constructRightHandC();
-        void solveC();
-        void solveEta();
-        void outputResults() const;
 
-        Triangulation<dim>  triangulation;
-        FE_Q<dim>           fe;
-        DoFHandler<dim>     dofHandler;
-
-        AffineConstraints<double>   constraints;
-
-        SparsityPattern         sparsityPattern;
-        SparseMatrix<double>    massMatrix;
-        SparseMatrix<double>    laplaceMatrix;
-        SparseMatrix<double>    matrixC;
-        SparseMatrix<double>    matrixEta;
-
-        Vector<double> solutionC;
-        Vector<double> solutionEta;
-        Vector<double> oldSolutionC;
-        Vector<double> systemRightHandSideC;
-        Vector<double> systemRightHandSideEta;
-        
-        Vector<double>  cellRightHandSideEta;
-        Vector<double>  cellRightHandSideC;
-
-        double          timeStep;
-        double          time;
-        unsigned int    timestepNumber;
-        double          totalSimTime;
+        mutable std::default_random_engine  generator;
+        mutable std::normal_distribution<double>    distribution;
 
         double eps;
-    };
+};
 
-    template<int dim> CahnHilliardEquation<dim> 
-        :: CahnHilliardEquation(std::unordered_map<std::string, double> params,
-                                double totalSimTime)
-            : fe(1)
-            , dofHandler(triangulation)
-            , timeStep(1. / 256.)
-            , time(timeStep)
-            , timestepNumber(1)
-    {
-        this->setupSystem(params,
-                          totalSimTime);
-    }
+template<int dim> 
+InitialValuesC<dim>::InitialValuesC(double eps)
+    : eps(eps)
+{}
+    
+template<int dim> double InitialValuesC<dim> :: value(
+    const Point<dim> &p,
+    const unsigned int /*component*/
+) const
+{
+    return std::tanh(
+        (p.norm()-0.25) / (std::sqrt(2)*this->eps)
+    ); 
+}
 
-    template<int dim> void CahnHilliardEquation<dim> :: setupSystem(
+template<int dim>
+class CahnHilliardEquation
+{
+public:
+    CahnHilliardEquation();
+    void run(
         const std::unordered_map<std::string, double> params,
         const double                                  totalSimTime
-    )
-    {
-
-        std::cout << "Passing parameters:" << std::endl;
-        for(auto it=params.begin(); it!=params.end(); it++){
-            std::cout   << "    "   << it->first
-                        << ": "     << it->second
-                        << std::endl;
-        }
-
-        this->eps = params.at("eps");
-        this->totalSimTime = totalSimTime;
-        
-        std::cout << "Building mesh" << std::endl;
-
-        GridGenerator::hyper_cube(
-            this->triangulation,
-            -1, 1,
-            true
         );
 
-        std::cout   << "Connecting nodes to neighbours due to periodic boundary"
-                    << " conditions."
-                    << std::endl;
+private:
+    void setupSystem(
+            const std::unordered_map<std::string, double> params,
+            const double                                  totalSimTime
+    );
+    void setupTriang();
+    void setupDoFs();
+    void reinitMandV();
+    void initializeValues();
+    void constructRightHandEta();
+    void constructRightHandC();
+    void solveC();
+    void solveEta();
+    void outputResults() const;
+
+    Triangulation<dim>  triangulation;
+    FE_Q<dim>           fe;
+    DoFHandler<dim>     dof_handler;
+
+    AffineConstraints<double>   constraints;
+
+    SparsityPattern         sparsity_pattern;
+    SparseMatrix<double>    mass_matrix;
+    SparseMatrix<double>    laplace_matrix;
+    SparseMatrix<double>    c_matrix;
+    SparseMatrix<double>    eta_matrix;
+    SparseMatrix<double>    newton_matrix;
+
+    Vector<double>  c_solution;
+    Vector<double>  c_old_solution;
+    Vector<double>  eta_solution;
+    Vector<double>  c_rhs;
+    Vector<double>  eta_rhs;
+    
+    FullMatrix<double>  cell_newton_matrix;
+    Vector<double>      cell_rhs_c;
+    Vector<double>      cell_rhs_eta;
+
+    double          timeStep;
+    double          time;
+    unsigned int    timestep_number;
+    double          totalSimTime;
+
+    double eps;
+};
+
+template<int dim> 
+CahnHilliardEquation<dim> :: CahnHilliardEquation()
+        : fe(1)
+        , dof_handler(triangulation)
+        , timeStep(1. / 256.)
+        , time(timeStep)
+        , timestep_number(1)
+{}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: setupTriang(){
+
+    std::cout << "Building mesh" << std::endl;
+
+    GridGenerator::hyper_cube(
+        this->triangulation,
+        -1, 1,
+        true
+    );
+
+    std::cout   << "Connecting nodes to neighbours due to periodic boundary"
+                << " conditions."
+                << std::endl;
+    
+    if(dim == 2){
 
         std::vector<GridTools::PeriodicFacePair<
             typename Triangulation<dim>::cell_iterator>
-        > matchedPairsX;
+        > matched_pairs_X;
 
         std::vector<GridTools::PeriodicFacePair<
             typename Triangulation<dim>::cell_iterator>
-        > matchedPairsY;
+        > matched_pairs_Y;
 
         GridTools::collect_periodic_faces(this->triangulation,
-                                          0, 1, 0, matchedPairsX);
+                                          0, 1, 0, matched_pairs_X);
         
         GridTools::collect_periodic_faces(this->triangulation,
-                                          2, 3, 1, matchedPairsY);
+                                          2, 3, 1, matched_pairs_Y);
 
-        triangulation.add_periodicity(matchedPairsX);
-        triangulation.add_periodicity(matchedPairsY);
+        triangulation.add_periodicity(matched_pairs_X);
+        triangulation.add_periodicity(matched_pairs_Y);
 
-        std::cout << "Neighbours updated to reflect periodicity" << std::endl;
-    
-        std::cout << "Refining grid" << std::endl;
-        triangulation.refine_global(8);
-
-        std::cout   << "Mesh generated...\n"
-                    << "Active cells: " << triangulation.n_active_cells()
-                    << std::endl;
-
-        std::cout   << "Indexing degrees of freedom..."
-                    << std::endl;
-
-        this->dofHandler.distribute_dofs(fe);
-
-        std::cout   << "Number of degrees of freedom: "
-                    << dofHandler.n_dofs()
-                    << std::endl;
-
-        std::cout   << "Building sparsity pattern..."
-                    << std::endl;
+    } else if (dim == 3) {
 
         std::vector<GridTools::PeriodicFacePair<
-            typename DoFHandler<dim>::cell_iterator>
-        > periodicity_vectorX;
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_X;
 
         std::vector<GridTools::PeriodicFacePair<
-            typename DoFHandler<dim>::cell_iterator>
-        > periodicity_vectorY;
-
-        GridTools::collect_periodic_faces(this->dofHandler,
-                                          0,1,0,periodicity_vectorX);
-        GridTools::collect_periodic_faces(this->dofHandler,
-                                          2,3,1,periodicity_vectorY);
-
-        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
-                                                        this->constraints);
-        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
-                                                        this->constraints);
-
-        constraints.close();
-
-        DynamicSparsityPattern dsp(
-            dofHandler.n_dofs(),
-            dofHandler.n_dofs()
-        );
-        DoFTools::make_sparsity_pattern(dofHandler,
-                                        dsp,
-                                        this->constraints);
-        sparsityPattern.copy_from(dsp);
-        sparsityPattern.compress();
-
-        std::cout   << "Reinitializing matices based on new pattern..."
-                    << std::endl;
-
-        massMatrix.reinit(sparsityPattern);
-        laplaceMatrix.reinit(sparsityPattern);
-        matrixC.reinit(sparsityPattern);
-        matrixEta.reinit(sparsityPattern);
-
-        std::cout   << "Filling entries for mass and laplace matrix..."
-                    << std::endl;
-
-        MatrixCreator::create_mass_matrix(
-            dofHandler,
-            QGauss<dim>(fe.degree+1),
-            massMatrix
-        );
-
-        MatrixCreator::create_laplace_matrix(
-            dofHandler,
-            QGauss<dim>(fe.degree+1),
-            massMatrix
-        );
-
-        std::cout   << "Initializing vectors..."
-                    << std::endl;
-
-        this->solutionC.reinit(dofHandler.n_dofs());
-        this->solutionEta.reinit(dofHandler.n_dofs());
-        this->oldSolutionC.reinit(dofHandler.n_dofs());
-        this->systemRightHandSideC.reinit(dofHandler.n_dofs());
-        this->systemRightHandSideEta.reinit(dofHandler.n_dofs());
-
-        std::cout   << "\nCompleted construction\n"
-                    << std::endl;
-
-        std::cout   << "Building constraints from periodicity..."
-                    << std::endl;
-
-
-        std::cout   << "Periodicity constraints added"
-                    << std::endl;
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_Y;
         
-        // Initialize memory for cell values and RHS
-        this->cellRightHandSideEta.reinit(fe.n_dofs_per_cell());
-        this->cellRightHandSideC.reinit(fe.n_dofs_per_cell());
+        std::vector<GridTools::PeriodicFacePair<
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_Z;
 
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          0, 1, 0, matched_pairs_X);
+        
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          2, 3, 1, matched_pairs_Y);
+
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          4, 5, 2, matched_pairs_Z);
+
+        triangulation.add_periodicity(matched_pairs_X);
+        triangulation.add_periodicity(matched_pairs_Y);
+        triangulation.add_periodicity(matched_pairs_Z);
     }
 
-    template<int dim> class InitialValuesC : public Function<dim>
-    {
-        public:
-            InitialValuesC(double eps);
-            virtual double value(
-                const Point<dim> &p,
-                const unsigned int component = 0
-            ) const override;
+    std::cout << "Neighbours updated to reflect periodicity" << std::endl;
 
-        private:
+    std::cout << "Refining grid" << std::endl;
+    triangulation.refine_global(8);
 
-            mutable std::default_random_engine  generator;
-            mutable std::normal_distribution<double>    distribution;
+    std::cout   << "Mesh generated...\n"
+                << "Active cells: " << triangulation.n_active_cells()
+                << std::endl;
 
-            double eps;
-    };
+}
 
-    template<int dim> InitialValuesC<dim>::InitialValuesC(double eps)
-        : generator()
-        , distribution(0,0.25)
-        , eps(eps)
-    {}
+template<int dim>
+void CahnHilliardEquation<dim> :: setupDoFs()
+{
+
+    std::cout   << "Indexing degrees of freedom..."
+                << std::endl;
+
+    this->dof_handler.distribute_dofs(fe);
+
+    std::cout   << "Number of degrees of freedom: "
+                << dof_handler.n_dofs()
+                << std::endl;
+
+    std::cout   << "Adding periodicity considerations to degrees of freedom"
+                << " and constraints"
+                << std::endl;
+
+    std::vector<GridTools::PeriodicFacePair<
+        typename DoFHandler<dim>::cell_iterator>
+    > periodicity_vectorX;
+
+    std::vector<GridTools::PeriodicFacePair<
+        typename DoFHandler<dim>::cell_iterator>
+    > periodicity_vectorY;
+
+    GridTools::collect_periodic_faces(this->dof_handler,
+                                      0,1,0,periodicity_vectorX);
+    GridTools::collect_periodic_faces(this->dof_handler,
+                                      2,3,1,periodicity_vectorY);
+
+    DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
+                                                    this->constraints);
+    DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
+                                                    this->constraints);
+
+    std::cout   << "Closing constraints" << std::endl;
+    constraints.close();
+
+    std::cout   << "Building sparsity pattern..."
+                << std::endl;
+
+    DynamicSparsityPattern dsp(
+        dof_handler.n_dofs(),
+        dof_handler.n_dofs()
+    );
+    DoFTools::make_sparsity_pattern(dof_handler,
+                                    dsp,
+                                    this->constraints);
+    sparsity_pattern.copy_from(dsp);
+    sparsity_pattern.compress();
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: reinitMandV()
+{
+    std::cout   << "Reinitializing matices based on new pattern..."
+                << std::endl;
+
+    mass_matrix.reinit(sparsity_pattern);
+    laplace_matrix.reinit(sparsity_pattern);
+    c_matrix.reinit(sparsity_pattern);
+    eta_matrix.reinit(sparsity_pattern);
+
+    std::cout   << "Reinitializing mass and laplace matrix..."
+                << std::endl;
+
+    MatrixCreator::create_mass_matrix(
+        dof_handler,
+        QGauss<dim>(fe.degree+1),
+        mass_matrix
+    );
+
+    MatrixCreator::create_laplace_matrix(
+        dof_handler,
+        QGauss<dim>(fe.degree+1),
+        laplace_matrix
+    );
+
+    this->newton_matrix.reinit(this->sparsity_pattern);
+
+    std::cout   << "Reinitializing vectors..."
+                << std::endl;
+
+    this->c_solution.reinit(dof_handler.n_dofs());
+    this->c_old_solution.reinit(dof_handler.n_dofs());
+    this->eta_solution.reinit(dof_handler.n_dofs());
+
+    this->c_rhs.reinit(dof_handler.n_dofs());
+    this->eta_rhs.reinit(dof_handler.n_dofs());
+
+    // Initialize memory for cell values and RHS
+    this->cell_rhs_c.reinit(fe.n_dofs_per_cell());
+    this->cell_rhs_eta.reinit(fe.n_dofs_per_cell());
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: setupSystem(
+    const std::unordered_map<std::string, double> params,
+    const double                                  totalSimTime
+)
+{
+
+    std::cout << "Passing parameters:" << std::endl;
+    for(auto it=params.begin(); it!=params.end(); it++){
+        std::cout   << "    "   << it->first
+                    << ": "     << it->second
+                    << std::endl;
+    }
+
+    this->eps = params.at("eps");
+    this->totalSimTime = totalSimTime;
     
-    template<int dim> double InitialValuesC<dim> :: value(
-        const Point<dim> &p,
-        const unsigned int i /*component*/
-    ) const
-    {
-        return std::tanh(
-            (p.norm()-0.25) / (std::sqrt(2)*this->eps)
-        ); 
-    }
+    this->setupTriang();
+    this->setupDoFs();
+    this->reinitMandV();
 
-    template<int dim> void CahnHilliardEquation<dim> :: initializeValues()
-    {   
-       
-        std::cout   << "Initializing values for C" << std::endl;
+}
 
-        VectorTools::project(this->dofHandler,
-                             this->constraints,
-                             QGauss<dim>(fe.degree + 1),
-                             InitialValuesC<dim>(this->eps),
-                             this->oldSolutionC);
-        this->constraints.distribute(this->oldSolutionC);
+template<int dim>
+void CahnHilliardEquation<dim> :: initializeValues()
+{   
+   
+    std::cout   << "Initializing values for C" << std::endl;
 
-        double* maxC = std::max_element(oldSolutionC.begin(),
-                                        oldSolutionC.end());
-        double* minC = std::min_element(oldSolutionC.begin(),
-                                        oldSolutionC.end());
+    VectorTools::project(this->dof_handler,
+                         this->constraints,
+                         QGauss<dim>(fe.degree + 1),
+                         InitialValuesC<dim>(this->eps),
+                         this->c_old_solution);
+    this->constraints.distribute(this->oldSolutionC);
 
-        std::cout   << "Initial values propagated:\n"
-                    << "    Range: (" 
-                        << *minC << ", " 
-                        << *maxC
-                    << ")" 
-                    << std::endl;
+    auto c_range = std::minmax_element(c_old_solution.begin(),
+                                       c_old_solution.end());
 
-    }
+    std::cout   << "Initial values propagated:\n"
+                << "    Range: (" 
+                    << *c_range.first << ", " 
+                    << *c_range.second
+                << ")" 
+                << std::endl;
 
-    template<int dim> void CahnHilliardEquation<dim>
-        :: solveEta()
-    {   
-        SolverControl               solverControl(
-                                        1000,
-                                        1e-8 * systemRightHandSideEta.l2_norm()
-                                    );
-        SolverCG<Vector<double>>    cg(solverControl);
+}
 
-        this->constraints.condense(this->massMatrix,
-                                   this->systemRightHandSideEta);
-        cg.solve(
-            this->massMatrix,
-            this->solutionEta,
-            this->systemRightHandSideEta,
-            PreconditionIdentity()
-        );
-        this->constraints.distribute(this->solutionEta);
+template<int dim>
+void CahnHilliardEquation<dim> :: solveEta()
+{   
+    SolverControl               solverControl(
+                                    1000,
+                                    1e-8 * eta_rhs.l2_norm()
+                                );
+    SolverCG<Vector<double>>    cg(solverControl);
 
-        std::cout   << "    Eta solved: "
-                    << solverControl.last_step()
-                    << " CG iterations."
-                    << std::endl;
-    }
+    this->constraints.condense(this->eta_matrix,
+                               this->eta_rhs);
+    PreconditionSSOR<SparseMatrix<double>> preconditioner;
+    preconditioner.initialize(this->eta_matrix, 1.2);
+    cg.solve(
+        this->eta_matrix,
+        this->eta_solution,
+        this->eta_rhs,
+        preconditioner
+    );
+    this->constraints.distribute(this->solutionEta);
 
-    template<int dim> void CahnHilliardEquation<dim>
-        :: solveC()
-    {   
-        SolverControl               solverControl(
-                                        1000,
-                                        1e-8 * systemRightHandSideC.l2_norm()
-                                    );
-        SolverCG<Vector<double>>    cg(solverControl);
+    std::cout   << "    Eta solved: "
+                << solverControl.last_step()
+                << " CG iterations."
+                << std::endl;
+}
 
-        this->constraints.condense(this->massMatrix,
-                                   this->systemRightHandSideC);
-        cg.solve(
-            this->massMatrix,
-            this->solutionC,
-            this->systemRightHandSideC,
-            PreconditionIdentity()
-        );
-        this->constraints.distribute(this->solutionC);
+template<int dim>
+void CahnHilliardEquation<dim> :: solveC()
+{   
+    SolverControl               solverControl(
+                                    1000,
+                                    1e-8 * c_rhs.l2_norm()
+                                );
+    SolverCG<Vector<double>>    cg(solverControl);
 
-        std::cout   << "    C solved: "
-                    << solverControl.last_step()
-                    << " CG iterations."
-                    << std::endl;
-    }
+    this->constraints.condense(this->c_matrix,
+                               this->c_rhs);
+    PreconditionSSOR<SparseMatrix<double>> preconditioner;
+    preconditioner.initialize(this->c_matrix, 1.2);
+    cg.solve(
+        this->c_matrix,
+        this->c_solution,
+        this->c_rhs,
+        preconditioner
+    );
+    this->constraints.distribute(this->solutionC);
+
+    std::cout   << "    C solved: "
+                << solverControl.last_step()
+                << " CG iterations."
+                << std::endl;
+}
     
-    template<int dim> void CahnHilliardEquation<dim> 
-        :: outputResults() const
-    {
+template<int dim>
+void CahnHilliardEquation<dim> :: outputResults() const
+{
 
-        DataOut<dim> dataOut;
+    DataOut<dim> dataOut;
 
-        dataOut.attach_dof_handler(this->dofHandler);
-        dataOut.add_data_vector(this->solutionC, "C");
-        dataOut.add_data_vector(this->solutionEta, "Eta");
-        dataOut.build_patches();
+    dataOut.attach_dof_handler(this->dof_handler);
+    dataOut.add_data_vector(this->c_solution, "C");
+    dataOut.add_data_vector(this->eta_solution, "Eta");
+    dataOut.build_patches();
 
-        const std::string filename = ("data/solution-" 
-                                     + std::to_string(this->timestepNumber) 
-                                     + ".vtu");
+    const std::string filename = ("data/solution-" 
+                                 + std::to_string(this->timestep_number) 
+                                 + ".vtu");
 
-        DataOutBase::VtkFlags vtk_flags;
-        vtk_flags.compression_level = DataOutBase::VtkFlags::ZlibCompressionLevel::best_speed;
-        dataOut.set_flags(vtk_flags);
+    DataOutBase::VtkFlags vtk_flags;
+    vtk_flags.compression_level = DataOutBase::VtkFlags::ZlibCompressionLevel::best_speed;
+    dataOut.set_flags(vtk_flags);
 
-        std::ofstream output(filename);
-        dataOut.write_vtu(output);
+    std::ofstream output(filename);
+    dataOut.write_vtu(output);
 
-    };
+};
 
-    template<int dim> void CahnHilliardEquation<dim>
-        :: run()
-    {
-        this->initializeValues();
-
-        QGauss<dim>     quadFormula(fe.degree + 1);
-        FEValues<dim>   feValues(fe,
-                                 quadFormula,
-                                 update_values | 
-                                 update_JxW_values |
-                                 update_gradients);
-
-        std::vector<types::global_dof_index> 
-            local_dof_indices(fe.n_dofs_per_cell());
-
-        std::vector<double> cellValuesC(quadFormula.size());
-        std::vector<Tensor<1,dim>> cellGradEta(quadFormula.size());
-
-        Vector<double> temp(dofHandler.n_dofs());
-
-        for(; this->time < this->totalSimTime; ++this->timestepNumber)
-        {
-            this->time += this->timeStep;
-
-            std::cout   << "\rCurrent time: " << this->time << std::flush; 
-            std::cout   << "    Constructing RHS for eta^n" << std::endl;
-
-            // systemRightHandSideEta = AC^n
-            laplaceMatrix.vmult(systemRightHandSideEta, this->oldSolutionC);
-
-            this->systemRightHandSideEta *= pow(this->eps,2);
-
-            for(const auto &cell : this->dofHandler.active_cell_iterators())
-            {
-                feValues.reinit(cell);
-                feValues.get_function_values(oldSolutionC,
-                                             cellValuesC);
-
-                cell->get_dof_indices(local_dof_indices);
-                for(const unsigned int qIndex : feValues.quadrature_point_indices())
-                {
-                    double Cx = cellValuesC[qIndex];
-                    
-                    if (std::abs(Cx) > 2){
-                        std::cout << std::endl;
-                        std::cerr << "Value has fallen outside of viable range";
-                        std::cout << std::endl;
-                        assert(std::abs(Cx) <= 2);
-                    }
-                    for(const unsigned int i : feValues.dof_indices())
-                    {
-                        // systemRightHandSide -= (phi_i, F(C^n))
-                        // where F(C^n) = ( C^n (1 - (C^n)^2) )
-                        this->systemRightHandSideEta(local_dof_indices[i])
-                            += feValues.shape_value(i, qIndex) 
-                                * (Cx * (pow(Cx,2) - 1))
-                                * feValues.JxW(qIndex);
-                    }
-                }
-            }
-            
-            std::cout << "    Solving for eta^n" << std::endl;
-            solveEta();
-            
-            std::cout << "    Constructing RHS for c^{n+1}" << std::endl;
-
-            massMatrix.vmult(systemRightHandSideC, this->oldSolutionC);
-
-            for(const auto &cell : this->dofHandler.active_cell_iterators())
-            {
-                feValues.reinit(cell);
-
-                feValues.get_function_values(oldSolutionC,
-                                             cellValuesC);
-                feValues.get_function_gradients(solutionEta,
-                                                cellGradEta);
-
-                cell->get_dof_indices(local_dof_indices);
-                for(const unsigned int qIndex : feValues.quadrature_point_indices())
-                {
-                    double Cx       = cellValuesC[qIndex];
-                    auto GradEtaX   = cellGradEta[qIndex];
-
-                    for(const unsigned int i : feValues.dof_indices())
-                    {
-                        this->systemRightHandSideC(local_dof_indices[i])
-                            -= (feValues.shape_grad(i, qIndex)
-                                * (1-pow(Cx,2))
-                                * GradEtaX) * feValues.JxW(qIndex) * this->timeStep;
-                                
-                    }
-                }
-            }
-
-            std::cout << "    Solving for c^{n+1}" << std::endl;
-            solveC();
- 
- 
-
-            this->oldSolutionC = this->solutionC;
-
-            if (this->timestepNumber % 5 == 0){
-
-                double maxC = *std::max_element(this->solutionC.begin(),
-                                                this->solutionC.end());
-                double minC = *std::min_element(this->solutionC.begin(),
-                                                this->solutionC.end());
-                double maxEta = *std::max_element(this->solutionEta.begin(),
-                                                  this->solutionEta.end());
-                double minEta = *std::min_element(this->solutionEta.begin(),
-                                                  this->solutionEta.end());
-
-                std::cout   << "    C Range: (" 
-                                << minC  << ", " 
-                                << maxC 
-                            << ")" << std::endl;
-                std::cout   << "    Eta Range: (" 
-                                << minEta  << ", " 
-                                << maxEta 
-                            << ")" << std::endl;
-                outputResults();
-            }
-
-        }
-
-    }
+template<int dim> 
+void CahnHilliardEquation<dim> :: run(
+    const std::unordered_map<std::string, double> params,
+    const double                                  totalSimTime
+)
+{
+    this->setupSystem(params, totalSimTime);
+    
+}
 
 }
 
@@ -512,8 +449,8 @@ int main(){
 
     double totalSimTime = 10;
 
-    cahnHilliard::CahnHilliardEquation<2> cahnHilliard(params, totalSimTime);
-    cahnHilliard.run();
+    cahnHilliard::CahnHilliardEquation<2> cahnHilliard;
+    cahnHilliard.run(params, totalSimTime);
 
     std::cout << "Completed" << std::endl;
 

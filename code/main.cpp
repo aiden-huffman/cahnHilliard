@@ -30,6 +30,7 @@
 #include <deal.II/lac/vector.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/precondition.h>
+#include <deal.II/lac/precondition_selector.h>
 #include <deal.II/lac/sparse_ilu.h>
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/linear_operator_tools.h>
@@ -107,6 +108,7 @@ private:
     void initializeValues();
 
     void assembleSystem();
+    void updateRHS();
     void solveSystem();
 
     void outputResults() const;
@@ -137,8 +139,7 @@ private:
 template<int dim> 
 CahnHilliardEquation<dim> :: CahnHilliardEquation()
     : degree(1)
-    , fe(FE_Q<dim>(degree),
-         FE_Q<dim>(degree))
+    , fe(FE_Q<dim>(degree),2)
     , quad_formula(degree+1)
     , fe_values(this->fe,
                 this->quad_formula,
@@ -146,7 +147,7 @@ CahnHilliardEquation<dim> :: CahnHilliardEquation()
                 update_gradients |
                 update_JxW_values)
     , dof_handler(triangulation)
-    , timestep(0)
+    , timestep(1e-6)
     , time(timestep)
     , timestep_number(1)
 {}
@@ -368,6 +369,9 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 
     std::cout << "Assembling system" << std::endl;
 
+    this->system_matrix = 0;
+    this->system_rhs    = 0;
+
     const unsigned int dofs_per_cell = this->fe.n_dofs_per_cell();
 
     FullMatrix<double>  local_matrix(
@@ -477,16 +481,102 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 }
 
 template<int dim>
+void CahnHilliardEquation<dim> :: updateRHS()
+{
+
+    std::cout << "Updating RHS..." << std::endl;
+
+    const unsigned int dofs_per_cell = this->fe.n_dofs_per_cell();
+
+    this->system_rhs = 0;
+
+    FullMatrix<double>  local_matrix(
+        dofs_per_cell, 
+        dofs_per_cell
+    );
+    Vector<double>      local_rhs(dofs_per_cell);
+
+    std::vector<double>          cell_old_phi_values(this->quad_formula.size());
+    std::vector<Tensor<1,dim>>   cell_old_phi_grad(this->quad_formula.size());
+
+    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+    const FEValuesExtractors::Scalar    phi(0);
+    const FEValuesExtractors::Scalar    eta(1);
+
+    for(const auto &cell : dof_handler.active_cell_iterators())
+    {
+
+        this->fe_values.reinit(cell);
+        local_matrix    = 0;
+        local_rhs       = 0;
+
+        cell->get_dof_indices(local_dof_indices);
+
+       this->fe_values[phi].get_function_values(
+            this->solution_old,
+            cell_old_phi_values
+        ); 
+       this->fe_values[phi].get_function_gradients(
+            this->solution_old,
+            cell_old_phi_grad
+        ); 
+
+        for(uint q_index = 0 ;  q_index < this->quad_formula.size(); q_index++)
+        {   
+
+            double          phi_old_x       = cell_old_phi_values[q_index];
+            Tensor<1,dim>   phi_old_x_grad  = cell_old_phi_grad[q_index];
+
+            for(uint i = 0; i < dofs_per_cell; i++)
+            {
+                
+                // <\varphi_i, phi_old>
+                local_rhs(i)    +=  this->fe_values[phi].value(i,q_index)
+                                *   phi_old_x
+                                *   this->fe_values.JxW(q_index);
+
+                // 3 k <\nabla\varphi_i, \nabla\phi_old>
+                local_rhs(i)    +=  3.0 * this->timestep
+                                *   this->fe_values[phi].gradient(i,q_index)
+                                *   phi_old_x_grad 
+                                *   this->fe_values.JxW(q_index);
+
+                // - k <\nabla\varphi_i, 3(\phi_old)^2 \nabla\phi_old>
+                local_rhs(i)    -=  this->timestep 
+                                *   (this->fe_values[phi].gradient(i,q_index)
+                                *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
+                                *   this->fe_values.JxW(q_index);
+
+                this->constraints.distribute_local_to_global(
+                    local_rhs,
+                    local_dof_indices,
+                    this->system_rhs
+                );
+            }
+        }
+    }
+
+    std::cout << "Update completed" << std::endl;
+}
+
+template<int dim>
 void CahnHilliardEquation<dim> :: solveSystem()
 {
 
     std::cout << "Solving system" << std::endl;
 
-    SolverControl               solverControlGMRES(
-                                    2000,
+    SolverControl               solverControlInner(
+                                    3000,
                                     1e-8 * this->system_rhs.block(0).l2_norm()
                                 );
-    SolverGMRES<Vector<double>>    gmres(solverControlGMRES);
+    SolverCG<Vector<double>>    solverInner(solverControlInner);
+
+    SolverControl               solverControlOuter(
+                                    3000,
+                                    1e-8 * this->system_rhs.block(0).l2_norm()
+                                );
+    SolverCG<Vector<double>>    solverOuter(solverControlOuter);
     
     // Decomposition of tangent matrix
     const auto A = linear_operator(system_matrix.block(0,0));
@@ -494,85 +584,6 @@ void CahnHilliardEquation<dim> :: solveSystem()
     const auto C = linear_operator(system_matrix.block(1,0));
     const auto D = linear_operator(system_matrix.block(1,1));
    
-    double matrix_max = system_matrix.block(0,0).begin()->value();
-    double matrix_min = system_matrix.block(0,0).begin()->value(); 
-
-    for(auto iterator = system_matrix.block(0,0).begin() ; iterator < system_matrix.block(0,0).end() ;
-        iterator++)
-    {
-        if(iterator->value() > matrix_max){
-            matrix_max = iterator->value();
-        }
-
-        if(iterator->value() < matrix_min){
-            matrix_min = iterator->value();
-        }
-    }
-
-    std::cout   << "Range of A matrix: " 
-                << matrix_min
-                << ", "
-                << matrix_max << std::endl;
-    
-    matrix_max = system_matrix.block(0,1).begin()->value();
-    matrix_min = system_matrix.block(0,1).begin()->value();
-
-    for(auto iterator = system_matrix.block(0,1).begin() ; iterator < system_matrix.block(0,1).end() ;
-        iterator++)
-    {
-        if(iterator->value() > matrix_max){
-            matrix_max = iterator->value();
-        }
-
-        if(iterator->value() < matrix_min){
-            matrix_min = iterator->value();
-        }
-    }
-    std::cout   << "Range of B matrix: " 
-                << matrix_min
-                << ", "
-                << matrix_max << std::endl;
-     
-    matrix_max = system_matrix.block(1,0).begin()->value();
-    matrix_min = system_matrix.block(1,0).begin()->value();
-
-    for(auto iterator = system_matrix.block(0,1).begin() ; iterator < system_matrix.block(0,1).end() ;
-        iterator++)
-    {
-        if(iterator->value() > matrix_max){
-            matrix_max = iterator->value();
-        }
-
-        if(iterator->value() < matrix_min){
-            matrix_min = iterator->value();
-        }
-    }
-
-    std::cout   << "Range of C matrix: " 
-                << matrix_min
-                << ", "
-                << matrix_max << std::endl;
-
-    matrix_max = system_matrix.block(1,1).begin()->value();
-    matrix_min = system_matrix.block(1,1).begin()->value();
-
-    for(auto iterator = system_matrix.block(0,1).begin() ; iterator < system_matrix.block(0,1).end() ;
-        iterator++)
-    {
-        if(iterator->value() > matrix_max){
-            matrix_max = iterator->value();
-        }
-
-        if(iterator->value() < matrix_min){
-            matrix_min = iterator->value();
-        }
-    }
-
-    std::cout   << "Range of D matrix: " 
-                << matrix_min
-                << ", "
-                << matrix_max << std::endl;
-
     // Decomposition of solution vector
     auto phi = solution.block(0);
     auto eta = solution.block(1);
@@ -594,13 +605,15 @@ void CahnHilliardEquation<dim> :: solveSystem()
                 << *eta_range.first << ", "
                 << *eta_range.second 
                 << ")" << std::endl;
-     
+    
+    SparseILU<double> precon_A;
+    precon_A.initialize(system_matrix.block(0,0));
+
     // Construction of inverse of Schur complement
-    const auto A_inv = inverse_operator(A, gmres);
+    const auto A_inv = inverse_operator(A, solverInner, precon_A);
     const auto S = schur_complement(A_inv,B,C,D);
      
-    // D and S operate on same space
-    const auto S_inv = inverse_operator(S,gmres);
+    const auto S_inv = inverse_operator(S, solverOuter);
      
     // Solve reduced block system
     // PackagedOperation that represents the condensed form of g
@@ -608,9 +621,13 @@ void CahnHilliardEquation<dim> :: solveSystem()
      
     // Solve for y
     eta = S_inv * rhs;
+
+    std::cout << "Solved inner problem..." << std::endl;
      
     // Compute x using resolved solution y
     phi = postprocess_schur_solution (A_inv, B, eta, phi_rhs);
+
+    std::cout << "Solved outer problem..." << std::endl;
 
     eta_range = std::minmax_element(eta.begin(),
                                     eta.end());
@@ -629,6 +646,7 @@ void CahnHilliardEquation<dim> :: solveSystem()
     this->solution.block(0) = phi;
     this->solution.block(1) = eta;
     this->constraints.distribute(this->solution);
+    this->solution_old = this->solution;
 
 }
 
@@ -640,7 +658,7 @@ void CahnHilliardEquation<dim> :: outputResults() const
 
     std::vector<DataComponentInterpretation::DataComponentInterpretation>
         interpretation(2,DataComponentInterpretation::component_is_scalar);
-    std::vector<std::string> solution_names = {"phi", "phi"};
+    std::vector<std::string> solution_names = {"phi", "eta"};
     std::vector<std::string> rhs_names = {"phi_rhs", "eta_rhs"};
     std::vector<std::string> old_names = {"phi_old", "eta_old"};
 
@@ -686,15 +704,16 @@ void CahnHilliardEquation<dim> :: run(
     this->assembleSystem();
     this->solveSystem();
     this->outputResults();
-
-    /*for(uint i = 0; i < 100; i++)
-    {
+    
+    for(uint i = 0; i < 10000; i++)
+    {   
         this->timestep_number++;
-        this->assembleC();
-        this->solveC();
-        this->outputResults();
-        this->c_old_solution = this->c_solution;
-    }*/
+        this->updateRHS();
+        this->solveSystem();
+        if(i % 10 == 0){
+            this->outputResults();
+        }
+    }
 }
 
 }

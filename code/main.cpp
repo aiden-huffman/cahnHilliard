@@ -76,7 +76,7 @@ double InitialValuesC<dim> :: value(
     const unsigned int component
 ) const
 {
-    if(component == 1)
+    if(component == 0)
     {
         return std::tanh(
             (p.norm()-0.25) / (std::sqrt(2)*this->eps)
@@ -342,10 +342,10 @@ void CahnHilliardEquation<dim> :: initializeValues()
 
     this->constraints.distribute(this->solution_old);
     
-    auto phi_range = std::minmax_element(this->solution_old.block(1).begin(),
-                                       this->solution_old.block(1).end());
-    auto eta_range = std::minmax_element(this->solution_old.block(0).begin(),
+    auto phi_range = std::minmax_element(this->solution_old.block(0).begin(),
                                        this->solution_old.block(0).end());
+    auto eta_range = std::minmax_element(this->solution_old.block(1).begin(),
+                                       this->solution_old.block(1).end());
 
 
     std::cout   << "Initial values propagated:\n"
@@ -381,8 +381,8 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 
     std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
-    const FEValuesExtractors::Scalar    eta(0);
-    const FEValuesExtractors::Scalar    phi(1);
+    const FEValuesExtractors::Scalar    phi(0);
+    const FEValuesExtractors::Scalar    eta(1);
 
     for(const auto &cell : dof_handler.active_cell_iterators())
     {
@@ -415,11 +415,18 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                 {
                     // (0,0): M
                     local_matrix(i,j)
-                        +=  this->fe_values[eta].value(i,q_index)
-                        *   this->fe_values[eta].value(j,q_index)
+                        +=  this->fe_values[phi].value(i,q_index)
+                        *   this->fe_values[phi].value(j,q_index)
                         *   this->fe_values.JxW(q_index);
                     
-                    // (0,1): - (2 M + epsilon^2 A)
+                    // (0,1): kA
+                    local_matrix(i,j)
+                        +=  this->timestep 
+                        *   this->fe_values[phi].gradient(i,q_index)
+                        *   this->fe_values[eta].gradient(j,q_index)
+                        *   this->fe_values.JxW(q_index);
+
+                    // (1,0): - (2 M + epsilon^2 A)
                     local_matrix(i,j)
                         -=  2.0 * this->fe_values[eta].value(i,q_index)
                             * this->fe_values[phi].value(j,q_index)
@@ -430,19 +437,11 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                             * this->fe_values[eta].gradient(i,q_index)
                             * this->fe_values[phi].gradient(j,q_index)
                             * this->fe_values.JxW(q_index); 
-
-
-                    // (1,0): kA
-                    local_matrix(i,j)
-                        +=  this->timestep 
-                        *   this->fe_values[phi].gradient(i,q_index)
-                        *   this->fe_values[eta].gradient(j,q_index)
-                        *   this->fe_values.JxW(q_index);
-                    
+ 
                     // (1,1): M
                     local_matrix(i,j)
-                        +=  this->fe_values[phi].value(i,q_index)
-                            * this->fe_values[phi].value(j,q_index)
+                        +=  this->fe_values[eta].value(i,q_index)
+                            * this->fe_values[eta].value(j,q_index)
                             * this->fe_values.JxW(q_index);
                 }
                 
@@ -485,7 +484,7 @@ void CahnHilliardEquation<dim> :: solveSystem()
 
     SolverControl               solverControlGMRES(
                                     2000,
-                                    1e-8 * this->system_rhs.block(1).l2_norm()
+                                    1e-8 * this->system_rhs.block(0).l2_norm()
                                 );
     SolverGMRES<Vector<double>>    gmres(solverControlGMRES);
     
@@ -494,19 +493,98 @@ void CahnHilliardEquation<dim> :: solveSystem()
     const auto B = linear_operator(system_matrix.block(0,1));
     const auto C = linear_operator(system_matrix.block(1,0));
     const auto D = linear_operator(system_matrix.block(1,1));
+   
+    double matrix_max = system_matrix.block(0,0).begin()->value();
+    double matrix_min = system_matrix.block(0,0).begin()->value(); 
+
+    for(auto iterator = system_matrix.block(0,0).begin() ; iterator < system_matrix.block(0,0).end() ;
+        iterator++)
+    {
+        if(iterator->value() > matrix_max){
+            matrix_max = iterator->value();
+        }
+
+        if(iterator->value() < matrix_min){
+            matrix_min = iterator->value();
+        }
+    }
+
+    std::cout   << "Range of A matrix: " 
+                << matrix_min
+                << ", "
+                << matrix_max << std::endl;
+    
+    matrix_max = system_matrix.block(0,1).begin()->value();
+    matrix_min = system_matrix.block(0,1).begin()->value();
+
+    for(auto iterator = system_matrix.block(0,1).begin() ; iterator < system_matrix.block(0,1).end() ;
+        iterator++)
+    {
+        if(iterator->value() > matrix_max){
+            matrix_max = iterator->value();
+        }
+
+        if(iterator->value() < matrix_min){
+            matrix_min = iterator->value();
+        }
+    }
+    std::cout   << "Range of B matrix: " 
+                << matrix_min
+                << ", "
+                << matrix_max << std::endl;
      
+    matrix_max = system_matrix.block(1,0).begin()->value();
+    matrix_min = system_matrix.block(1,0).begin()->value();
+
+    for(auto iterator = system_matrix.block(0,1).begin() ; iterator < system_matrix.block(0,1).end() ;
+        iterator++)
+    {
+        if(iterator->value() > matrix_max){
+            matrix_max = iterator->value();
+        }
+
+        if(iterator->value() < matrix_min){
+            matrix_min = iterator->value();
+        }
+    }
+
+    std::cout   << "Range of C matrix: " 
+                << matrix_min
+                << ", "
+                << matrix_max << std::endl;
+
+    matrix_max = system_matrix.block(1,1).begin()->value();
+    matrix_min = system_matrix.block(1,1).begin()->value();
+
+    for(auto iterator = system_matrix.block(0,1).begin() ; iterator < system_matrix.block(0,1).end() ;
+        iterator++)
+    {
+        if(iterator->value() > matrix_max){
+            matrix_max = iterator->value();
+        }
+
+        if(iterator->value() < matrix_min){
+            matrix_min = iterator->value();
+        }
+    }
+
+    std::cout   << "Range of D matrix: " 
+                << matrix_min
+                << ", "
+                << matrix_max << std::endl;
+
     // Decomposition of solution vector
-    auto eta = solution.block(0);
-    auto phi = solution.block(1);
+    auto phi = solution.block(0);
+    auto eta = solution.block(1);
     
     // Decomposition of RHS vector
-    auto eta_rhs = system_rhs.block(0);
-    auto phi_rhs = system_rhs.block(1);
+    auto phi_rhs = system_rhs.block(0);
+    auto eta_rhs = system_rhs.block(1);
     
-    auto eta_range = std::minmax_element(eta_rhs.begin(),
-                                         eta_rhs.end());
     auto phi_range = std::minmax_element(phi_rhs.begin(),
                                          phi_rhs.end());
+    auto eta_range = std::minmax_element(eta_rhs.begin(),
+                                         eta_rhs.end());
 
     std::cout   <<    "   Phi RHS range: (" 
                 << *phi_range.first << ", "
@@ -526,13 +604,13 @@ void CahnHilliardEquation<dim> :: solveSystem()
      
     // Solve reduced block system
     // PackagedOperation that represents the condensed form of g
-    auto rhs = condense_schur_rhs(A_inv,C,eta_rhs,phi_rhs);
+    auto rhs = condense_schur_rhs(A_inv,C, phi_rhs, eta_rhs);
      
     // Solve for y
-    phi = S_inv * rhs;
+    eta = S_inv * rhs;
      
     // Compute x using resolved solution y
-    eta = postprocess_schur_solution (A_inv,B,phi,eta_rhs);
+    phi = postprocess_schur_solution (A_inv, B, eta, phi_rhs);
 
     eta_range = std::minmax_element(eta.begin(),
                                     eta.end());
@@ -548,8 +626,8 @@ void CahnHilliardEquation<dim> :: solveSystem()
                 << *eta_range.second 
                 << ")" << std::endl;
 
-    this->solution.block(0) = eta;
-    this->solution.block(1) = phi;
+    this->solution.block(0) = phi;
+    this->solution.block(1) = eta;
     this->constraints.distribute(this->solution);
 
 }
@@ -562,9 +640,9 @@ void CahnHilliardEquation<dim> :: outputResults() const
 
     std::vector<DataComponentInterpretation::DataComponentInterpretation>
         interpretation(2,DataComponentInterpretation::component_is_scalar);
-    std::vector<std::string> solution_names = {"eta", "phi"};
-    std::vector<std::string> rhs_names = {"eta_rhs", "phi_rhs"};
-    std::vector<std::string> old_names = {"eta_old", "phi_old"};
+    std::vector<std::string> solution_names = {"phi", "phi"};
+    std::vector<std::string> rhs_names = {"phi_rhs", "eta_rhs"};
+    std::vector<std::string> old_names = {"phi_old", "eta_old"};
 
     dataOut.add_data_vector(this->dof_handler,
                             this->solution,

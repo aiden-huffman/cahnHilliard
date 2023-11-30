@@ -134,6 +134,7 @@ private:
     double          totalSimTime;
 
     double eps;
+    double theta;
 };
 
 template<int dim> 
@@ -147,9 +148,10 @@ CahnHilliardEquation<dim> :: CahnHilliardEquation()
                 update_gradients |
                 update_JxW_values)
     , dof_handler(triangulation)
-    , timestep(1e-6)
+    , timestep(1e-4)
     , time(timestep)
     , timestep_number(1)
+    , theta(0)
 {}
 
 template<int dim>
@@ -382,6 +384,7 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 
     std::vector<double>          cell_old_phi_values(this->quad_formula.size());
     std::vector<Tensor<1,dim>>   cell_old_phi_grad(this->quad_formula.size());
+    std::vector<Tensor<1,dim>>   cell_old_eta_grad(this->quad_formula.size());
 
     std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
@@ -405,12 +408,17 @@ void CahnHilliardEquation<dim> :: assembleSystem()
             this->solution_old,
             cell_old_phi_grad
         ); 
+       this->fe_values[phi].get_function_gradients(
+            this->solution_old,
+            cell_old_eta_grad
+        ); 
 
         for(uint q_index = 0 ;  q_index < this->quad_formula.size(); q_index++)
         {   
 
-            double          phi_old_x       = cell_old_phi_values[q_index];
-            Tensor<1,dim>   phi_old_x_grad  = cell_old_phi_grad[q_index];
+            double          phi_old_x          = cell_old_phi_values[q_index];
+            Tensor<1,dim>   phi_old_grad       = cell_old_phi_grad[q_index];
+            Tensor<1,dim>   eta_old_grad       = cell_old_eta_grad[q_index];
 
             for(uint i = 0; i < dofs_per_cell; i++)
             {
@@ -425,19 +433,19 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                     
                     // (0,1): kA
                     local_matrix(i,j)
-                        +=  this->timestep 
+                        +=  this->theta * this->timestep 
                         *   this->fe_values[phi].gradient(i,q_index)
                         *   this->fe_values[eta].gradient(j,q_index)
                         *   this->fe_values.JxW(q_index);
 
                     // (1,0): - (2 M + epsilon^2 A)
                     local_matrix(i,j)
-                        -=  2.0 * this->fe_values[eta].value(i,q_index)
+                        -=  this->theta * this->fe_values[eta].value(i,q_index)
                             * this->fe_values[phi].value(j,q_index)
                             * this->fe_values.JxW(q_index);
 
                     local_matrix(i,j)
-                        -=  pow(this->eps,2)
+                        -=  this->theta * pow(this->eps,2)
                             * this->fe_values[eta].gradient(i,q_index)
                             * this->fe_values[phi].gradient(j,q_index)
                             * this->fe_values.JxW(q_index); 
@@ -453,18 +461,21 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                 local_rhs(i)    +=  this->fe_values[phi].value(i,q_index)
                                 *   phi_old_x
                                 *   this->fe_values.JxW(q_index);
+                local_rhs(i)    -=  (1.-this->theta) * this->timestep
+                                *   this->fe_values[phi].gradient(i,q_index)
+                                *   eta_old_grad
+                                *   this->fe_values.JxW(q_index);
 
                 // 3 k <\nabla\varphi_i, \nabla\phi_old>
-                local_rhs(i)    +=  3.0 * this->timestep
-                                *   this->fe_values[phi].gradient(i,q_index)
-                                *   phi_old_x_grad 
+                local_rhs(i)    +=  this->fe_values[eta].value(i,q_index)
+                                *   pow(phi_old_x,3)
                                 *   this->fe_values.JxW(q_index);
-
-                // - k <\nabla\varphi_i, 3(\phi_old)^2 \nabla\phi_old>
-                local_rhs(i)    -=  this->timestep 
-                                *   (this->fe_values[phi].gradient(i,q_index)
-                                *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
+                
+                local_rhs(i)    += (1.-this->theta) * pow(this->eps, 2)
+                                *   this->fe_values[eta].gradient(i,q_index)
+                                *   phi_old_grad
                                 *   this->fe_values.JxW(q_index);
+                                
 
                 this->constraints.distribute_local_to_global(
                     local_matrix,
@@ -526,7 +537,6 @@ void CahnHilliardEquation<dim> :: updateRHS()
         {   
 
             double          phi_old_x       = cell_old_phi_values[q_index];
-            Tensor<1,dim>   phi_old_x_grad  = cell_old_phi_grad[q_index];
 
             for(uint i = 0; i < dofs_per_cell; i++)
             {
@@ -537,15 +547,8 @@ void CahnHilliardEquation<dim> :: updateRHS()
                                 *   this->fe_values.JxW(q_index);
 
                 // 3 k <\nabla\varphi_i, \nabla\phi_old>
-                local_rhs(i)    +=  3.0 * this->timestep
-                                *   this->fe_values[phi].gradient(i,q_index)
-                                *   phi_old_x_grad 
-                                *   this->fe_values.JxW(q_index);
-
-                // - k <\nabla\varphi_i, 3(\phi_old)^2 \nabla\phi_old>
-                local_rhs(i)    -=  this->timestep 
-                                *   (this->fe_values[phi].gradient(i,q_index)
-                                *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
+                local_rhs(i)    +=  this->fe_values[eta].value(i,q_index)
+                                *   pow(phi_old_x,3)
                                 *   this->fe_values.JxW(q_index);
 
                 this->constraints.distribute_local_to_global(
@@ -567,16 +570,16 @@ void CahnHilliardEquation<dim> :: solveSystem()
     std::cout << "Solving system" << std::endl;
 
     SolverControl               solverControlInner(
-                                    3000,
-                                    1e-8 * this->system_rhs.block(0).l2_norm()
+                                    5000,
+                                    1e-10 * this->system_rhs.block(1).l2_norm()
                                 );
     SolverCG<Vector<double>>    solverInner(solverControlInner);
 
     SolverControl               solverControlOuter(
-                                    3000,
+                                    10000,
                                     1e-8 * this->system_rhs.block(0).l2_norm()
                                 );
-    SolverCG<Vector<double>>    solverOuter(solverControlOuter);
+    SolverGMRES<Vector<double>>    solverOuter(solverControlOuter);
     
     // Decomposition of tangent matrix
     const auto A = linear_operator(system_matrix.block(0,0));
@@ -590,7 +593,7 @@ void CahnHilliardEquation<dim> :: solveSystem()
     
     // Decomposition of RHS vector
     auto phi_rhs = system_rhs.block(0);
-    auto eta_rhs = system_rhs.block(1);
+    auto eta_rhs = system_rhs.block(1); 
     
     auto phi_range = std::minmax_element(phi_rhs.begin(),
                                          phi_rhs.end());
@@ -612,9 +615,9 @@ void CahnHilliardEquation<dim> :: solveSystem()
     // Construction of inverse of Schur complement
     const auto A_inv = inverse_operator(A, solverInner, precon_A);
     const auto S = schur_complement(A_inv,B,C,D);
-     
-    const auto S_inv = inverse_operator(S, solverOuter);
-     
+  
+    const auto S_inv = inverse_operator(S, solverOuter, system_matrix.block(1,1));
+
     // Solve reduced block system
     // PackagedOperation that represents the condensed form of g
     auto rhs = condense_schur_rhs(A_inv,C, phi_rhs, eta_rhs);
@@ -674,7 +677,7 @@ void CahnHilliardEquation<dim> :: outputResults() const
                             this->system_rhs,
                             rhs_names,
                             interpretation);
-    dataOut.build_patches(this->degree+1);
+    dataOut.build_patches();
 
     const std::string filename = ("data/solution-" 
                                  + std::to_string(this->timestep_number) 
@@ -702,17 +705,15 @@ void CahnHilliardEquation<dim> :: run(
     this->initializeValues();
 
     this->assembleSystem();
-    this->solveSystem();
-    this->outputResults();
     
     for(uint i = 0; i < 10000; i++)
     {   
-        this->timestep_number++;
-        this->updateRHS();
+        std::cout << "Current sim time: " << this->time << std::endl;
         this->solveSystem();
-        if(i % 10 == 0){
-            this->outputResults();
-        }
+        this->timestep_number++;
+        this->time += this->timestep;
+        this->outputResults();
+        this->updateRHS();
     }
 }
 

@@ -67,24 +67,18 @@ class InitialValuesC : public Function<dim>
 
 template<int dim> 
 InitialValuesC<dim>::InitialValuesC(double eps)
-    : Function<dim>(2)
-    , eps(eps)
+    : eps(eps)
 {}
     
 template<int dim>
 double InitialValuesC<dim> :: value(
     const Point<dim> &p,
-    const unsigned int component
+    const unsigned int /*component*/
 ) const
 {
-    if(component == 0)
-    {
-        return std::tanh(
-            (p.norm()-0.25) / (std::sqrt(2)*this->eps)
-        ); 
-    } else {
-         return 0.0;
-    }
+    return std::tanh(
+        (p.norm()-0.25) / (std::sqrt(2)*this->eps)
+    ); 
 }
 
 template<int dim>
@@ -115,18 +109,26 @@ private:
     
     uint                degree;
     Triangulation<dim>  triangulation;
-    FESystem<dim>       fe;
+    FE_Q<dim>           fe;
     QGauss<dim>         quad_formula;
     FEValues<dim>       fe_values;
     DoFHandler<dim>     dof_handler;
 
     AffineConstraints<double>   constraints;
 
-    BlockSparsityPattern        sparsity_pattern;
-    BlockSparseMatrix<double>   system_matrix;
-    BlockVector<double>         solution;
-    BlockVector<double>         solution_old;
-    BlockVector<double>         system_rhs;
+    SparsityPattern         sparsity_pattern;
+    SparseMatrix<double>    mass_matrix;
+    SparseMatrix<double>    laplace_matrix;
+
+    Vector<double>          phi_solution;
+    Vector<double>          phi_old_solution;
+    Vector<double>          phi_rhs;
+
+    Vector<double>          eta_solution;
+    Vector<double>          eta_rhs;
+
+    Vector<double>      local_phi_rhs;
+    Vector<double>      local_eta_rhs;
 
     double          timestep;
     double          time;
@@ -139,7 +141,7 @@ private:
 template<int dim> 
 CahnHilliardEquation<dim> :: CahnHilliardEquation()
     : degree(1)
-    , fe(FE_Q<dim>(degree),2)
+    , fe(FE_Q<dim>(degree))
     , quad_formula(degree+1)
     , fe_values(this->fe,
                 this->quad_formula,
@@ -147,7 +149,7 @@ CahnHilliardEquation<dim> :: CahnHilliardEquation()
                 update_gradients |
                 update_JxW_values)
     , dof_handler(triangulation)
-    , timestep(1e-4)
+    , timestep(1e-7)
     , time(timestep)
     , timestep_number(1)
 {}
@@ -233,21 +235,11 @@ void CahnHilliardEquation<dim> :: setupDoFs()
                 << std::endl;
 
     this->dof_handler.distribute_dofs(fe);
-    DoFRenumbering::component_wise(this->dof_handler);
-    
-    const std::vector<types::global_dof_index> dofs_per_component =
-        DoFTools::count_dofs_per_fe_component(this->dof_handler);
-    
-    const std::vector<types::global_dof_index> block_sizes = 
-        {dofs_per_component[0],
-         dofs_per_component[1]};
-
+    DoFRenumbering::Cuthill_McKee(this->dof_handler);
+     
     std::cout   << "Number of degrees of freedom: "
                 << dof_handler.n_dofs()
                 << std::endl;
-    std::cout   << "Per block:\n"
-                << "    Block 0: " << dofs_per_component[0] << std::endl
-                << "    Block 1: " << dofs_per_component[1] << std::endl;
 
     std::cout   << "Adding periodicity considerations to degrees of freedom"
                 << " and constraints"
@@ -277,7 +269,7 @@ void CahnHilliardEquation<dim> :: setupDoFs()
     std::cout   << "Building sparsity pattern..."
                 << std::endl;
 
-    BlockDynamicSparsityPattern dsp(block_sizes, block_sizes);
+    DynamicSparsityPattern dsp(this->dof_handler.n_dofs());
     DoFTools::make_sparsity_pattern(
         this->dof_handler,
         dsp,
@@ -286,6 +278,40 @@ void CahnHilliardEquation<dim> :: setupDoFs()
     sparsity_pattern.copy_from(dsp);
     sparsity_pattern.compress();
     
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: reinitLinearSystem()
+{
+    std::cout   << "Reinitializing the objects for the linear system"
+                << std::endl;
+
+    const std::vector<types::global_dof_index> dofs_per_component =
+        DoFTools::count_dofs_per_fe_component(this->dof_handler);
+    
+    this->mass_matrix.reinit(sparsity_pattern);
+    this->laplace_matrix.reinit(sparsity_pattern);
+
+    MatrixTools::create_mass_matrix(this->dof_handler,
+                                    this->quad_formula,
+                                    this->mass_matrix);
+    MatrixTools::create_laplace_matrix(this->dof_handler,
+                                       this->quad_formula,
+                                       this->laplace_matrix);
+
+    this->phi_solution.reinit(this->dof_handler.n_dofs());
+    this->phi_old_solution.reinit(this->dof_handler.n_dofs());
+    this->phi_rhs.reinit(this->dof_handler.n_dofs());
+
+    this->eta_solution.reinit(this->dof_handler.n_dofs());
+    this->eta_rhs.reinit(this->dof_handler.n_dofs());
+
+    this->local_phi_rhs.reinit(this->fe.dofs_per_cell);
+    this->local_eta_rhs.reinit(this->fe.dofs_per_cell);
+    
+    this->constraints.condense(this->mass_matrix);
+    this->constraints.condense(this->laplace_matrix);
+
 }
 
 template<int dim>
@@ -311,53 +337,26 @@ void CahnHilliardEquation<dim> :: setupSystem(
 }
 
 template<int dim>
-void CahnHilliardEquation<dim> :: reinitLinearSystem()
-{
-    std::cout   << "Reinitializing the objects for the linear system"
-                << std::endl;
-
-    const std::vector<types::global_dof_index> dofs_per_component =
-        DoFTools::count_dofs_per_fe_component(this->dof_handler);
-    
-    const std::vector<types::global_dof_index> block_sizes = 
-        {dofs_per_component[0],
-         dofs_per_component[1]};
-
-    this->system_matrix.reinit(sparsity_pattern);
-    this->solution.reinit(block_sizes);
-    this->solution_old.reinit(block_sizes);
-    this->system_rhs.reinit(block_sizes);
-}
-
-template<int dim>
 void CahnHilliardEquation<dim> :: initializeValues()
 {   
    
-    std::cout   << "Initializing values for C" << std::endl;
+    std::cout   << "Initializing values for phi" << std::endl;
 
     VectorTools::project(this->dof_handler,
                          this->constraints,
                          QGauss<dim>(fe.degree + 1),
                          InitialValuesC<dim>(this->eps),
-                         this->solution_old);
+                         this->phi_old_solution);
 
-    this->constraints.distribute(this->solution_old);
+    this->constraints.distribute(this->phi_old_solution);
     
-    auto phi_range = std::minmax_element(this->solution_old.block(0).begin(),
-                                       this->solution_old.block(0).end());
-    auto eta_range = std::minmax_element(this->solution_old.block(1).begin(),
-                                       this->solution_old.block(1).end());
-
+    auto phi_range = std::minmax_element(this->phi_old_solution.begin(),
+                                         this->phi_old_solution.end());
 
     std::cout   << "Initial values propagated:\n"
                 << "    Phi Range: (" 
                     << *phi_range.first << ", " 
                     << *phi_range.second
-                << ")" 
-                << std::endl;
-    std::cout   << "    Eta Range: (" 
-                    << *eta_range.first << ", " 
-                    << *eta_range.second
                 << ")" 
                 << std::endl;
 
@@ -369,16 +368,13 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 
     std::cout << "Assembling system" << std::endl;
 
-    this->system_matrix = 0;
-    this->system_rhs    = 0;
+    this->phi_rhs = 0;
+    this->eta_rhs = 0;
+
+    this->mass_matrix.vmult(this->phi_rhs, this->phi_old_solution);
 
     const unsigned int dofs_per_cell = this->fe.n_dofs_per_cell();
 
-    FullMatrix<double>  local_matrix(
-        dofs_per_cell, 
-        dofs_per_cell
-    );
-    Vector<double>      local_rhs(dofs_per_cell);
 
     std::vector<double>          cell_old_phi_values(this->quad_formula.size());
     std::vector<Tensor<1,dim>>   cell_old_phi_grad(this->quad_formula.size());
@@ -393,13 +389,12 @@ void CahnHilliardEquation<dim> :: assembleSystem()
     {
 
         this->fe_values.reinit(cell);
-        local_matrix    = 0;
-        local_rhs       = 0;
+        this->local_eta_rhs = 0;
 
         cell->get_dof_indices(local_dof_indices);
 
-       this->fe_values[phi].get_function_values(
-            this->solution_old,
+       this->fe_values.get_function_values(
+            this->phi_old_solution,
             cell_old_phi_values
         ); 
 
@@ -410,129 +405,21 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 
             for(uint i = 0; i < dofs_per_cell; i++)
             {
-                
-                for(uint j = 0; j < dofs_per_cell; j++)
-                {
-                    // (0,0): M
-                    local_matrix(i,j)
-                        +=  this->fe_values[phi].value(i,q_index)
-                        *   this->fe_values[phi].value(j,q_index)
-                        *   this->fe_values.JxW(q_index);
-                    
-                    // (0,1): kA
-                    local_matrix(i,j)
-                        +=  this->timestep 
-                        *   this->fe_values[phi].gradient(i,q_index)
-                        *   this->fe_values[eta].gradient(j,q_index)
-                        *   this->fe_values.JxW(q_index);
-
-                    // (1,0): M - epsilon^2 A
-                    local_matrix(i,j)
-                        +=  this->fe_values[eta].value(i,q_index)
-                            * this->fe_values[phi].value(j,q_index)
-                            * this->fe_values.JxW(q_index);
-                    local_matrix(i,j)
-                        -=  pow(this->eps,2)
-                            * this->fe_values[eta].gradient(i,q_index)
-                            * this->fe_values[phi].gradient(j,q_index)
-                            * this->fe_values.JxW(q_index); 
- 
-                    // (1,1): M
-                    local_matrix(i,j)
-                        +=  this->fe_values[eta].value(i,q_index)
-                            * this->fe_values[eta].value(j,q_index)
-                            * this->fe_values.JxW(q_index);
-                }
-                
-                // <\varphi_i, phi_old>
-                local_rhs(i)    +=  this->fe_values[eta].value(i,q_index)
-                                *   pow(phi_old_x,3)
-                                *   this->fe_values.JxW(q_index);
+                 
+                local_eta_rhs(i)    +=  this->fe_values.shape_value(i,q_index)
+                                    *   pow(phi_old_x,3)
+                                    *   this->fe_values.JxW(q_index);
 
                 this->constraints.distribute_local_to_global(
-                    local_matrix,
-                    local_rhs,
+                    local_eta_rhs,
                     local_dof_indices,
-                    this->system_matrix,
-                    this->system_rhs
+                    this->eta_rhs
                 );
             }
         }
     }
 
     std::cout << "Assembly completed" << std::endl;
-}
-
-template<int dim>
-void CahnHilliardEquation<dim> :: updateRHS()
-{
-
-    std::cout << "Updating RHS..." << std::endl;
-
-    const unsigned int dofs_per_cell = this->fe.n_dofs_per_cell();
-
-    this->system_rhs = 0;
-
-    FullMatrix<double>  local_matrix(
-        dofs_per_cell, 
-        dofs_per_cell
-    );
-    Vector<double>      local_rhs(dofs_per_cell);
-
-    std::vector<double>          cell_old_phi_values(this->quad_formula.size());
-    std::vector<Tensor<1,dim>>   cell_old_phi_grad(this->quad_formula.size());
-
-    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
-
-    const FEValuesExtractors::Scalar    phi(0);
-    const FEValuesExtractors::Scalar    eta(1);
-
-    for(const auto &cell : dof_handler.active_cell_iterators())
-    {
-
-        this->fe_values.reinit(cell);
-        local_matrix    = 0;
-        local_rhs       = 0;
-
-        cell->get_dof_indices(local_dof_indices);
-
-       this->fe_values[phi].get_function_values(
-            this->solution_old,
-            cell_old_phi_values
-        ); 
-       this->fe_values[phi].get_function_gradients(
-            this->solution_old,
-            cell_old_phi_grad
-        ); 
-
-        for(uint q_index = 0 ;  q_index < this->quad_formula.size(); q_index++)
-        {   
-
-            double          phi_old_x       = cell_old_phi_values[q_index];
-
-            for(uint i = 0; i < dofs_per_cell; i++)
-            {
-                
-                // <\varphi_i, phi_old>
-                local_rhs(i)    +=  this->fe_values[phi].value(i,q_index)
-                                *   phi_old_x
-                                *   this->fe_values.JxW(q_index);
-
-                // 3 k <\nabla\varphi_i, \nabla\phi_old>
-                local_rhs(i)    +=  this->fe_values[eta].value(i,q_index)
-                                *   pow(phi_old_x,3)
-                                *   this->fe_values.JxW(q_index);
-
-                this->constraints.distribute_local_to_global(
-                    local_rhs,
-                    local_dof_indices,
-                    this->system_rhs
-                );
-            }
-        }
-    }
-
-    std::cout << "Update completed" << std::endl;
 }
 
 template<int dim>
@@ -543,86 +430,64 @@ void CahnHilliardEquation<dim> :: solveSystem()
 
     SolverControl               solverControlInner(
                                     5000,
-                                    1e-10 * this->system_rhs.block(1).l2_norm()
+                                    1e-10 * this->eta_rhs.l2_norm()
                                 );
     SolverCG<Vector<double>>    solverInner(solverControlInner);
 
     SolverControl               solverControlOuter(
                                     10000,
-                                    1e-8 * this->system_rhs.block(0).l2_norm()
+                                    1e-8 
                                 );
     SolverGMRES<Vector<double>>    solverOuter(solverControlOuter);
-    
-    // Decomposition of tangent matrix
-    const auto A = linear_operator(system_matrix.block(0,0));
-    const auto B = linear_operator(system_matrix.block(0,1));
-    const auto C = linear_operator(system_matrix.block(1,0));
-    const auto D = linear_operator(system_matrix.block(1,1));
    
-    // Decomposition of solution vector
-    auto phi = solution.block(0);
-    auto eta = solution.block(1);
     
-    // Decomposition of RHS vector
-    auto phi_rhs = system_rhs.block(0);
-    auto eta_rhs = system_rhs.block(1); 
-    
-    auto phi_range = std::minmax_element(phi_rhs.begin(),
-                                         phi_rhs.end());
-    auto eta_range = std::minmax_element(eta_rhs.begin(),
-                                         eta_rhs.end());
+    const auto M = linear_operator(this->mass_matrix);
+    const auto L = linear_operator(this->laplace_matrix);
 
-    std::cout   <<    "   Phi RHS range: (" 
-                << *phi_range.first << ", "
-                << *phi_range.second 
-                << ")" << std::endl;
-    std::cout   <<    "   Eta RHS range: (" 
-                << *eta_range.first << ", "
-                << *eta_range.second 
-                << ")" << std::endl;
-    
+    auto A = M;
+    auto B = this->timestep * L;
+    auto C = M + pow(this->eps, 2) * L;
+    auto D = M;
+
     SparseILU<double> precon_A;
-    precon_A.initialize(system_matrix.block(0,0));
+    precon_A.initialize(this->mass_matrix);
+    auto A_inv = inverse_operator(M, solverInner, precon_A);
 
-    // Construction of inverse of Schur complement
-    const auto A_inv = inverse_operator(A, solverInner, precon_A);
-    const auto S = schur_complement(A_inv,B,C,D);
-  
-    const auto S_inv = inverse_operator(S, solverOuter, system_matrix.block(1,1));
+    auto S = schur_complement(A_inv, B, C, D);
 
-    // Solve reduced block system
-    // PackagedOperation that represents the condensed form of g
-    auto rhs = condense_schur_rhs(A_inv,C, phi_rhs, eta_rhs);
-     
-    // Solve for y
-    eta = S_inv * rhs;
+    SparseILU<double> precon_S;
+    precon_S.initialize(this->laplace_matrix);
+    auto S_inv = inverse_operator(S, solverOuter, this->mass_matrix);
+    auto rhs = condense_schur_rhs(A_inv, C, this->phi_rhs, this->eta_rhs);
 
-    std::cout << "Solved inner problem..." << std::endl;
-     
-    // Compute x using resolved solution y
-    phi = postprocess_schur_solution (A_inv, B, eta, phi_rhs);
+    this->eta_solution = S_inv * rhs;
+    this->constraints.distribute(this->eta_solution);
 
-    std::cout << "Solved outer problem..." << std::endl;
+    this->phi_solution = postprocess_schur_solution(
+        A_inv, B, this->eta_solution, this->phi_rhs
+    );
+    this->constraints.distribute(this->phi_solution);
 
-    eta_range = std::minmax_element(eta.begin(),
-                                    eta.end());
-    phi_range = std::minmax_element(phi.begin(),
-                                    phi.end());
+    auto phi_range  = std::minmax_element(this->phi_solution.begin(),
+                                          this->phi_solution.end());
+    auto eta_range  = std::minmax_element(this->eta_solution.begin(),
+                                          this->eta_solution.end());
 
-    std::cout   <<    "   Phi range: (" 
-                << *phi_range.first << ", "
-                << *phi_range.second 
-                << ")" << std::endl;
-    std::cout   <<    "   Eta range: (" 
-                << *eta_range.first << ", "
-                << *eta_range.second 
-                << ")" << std::endl;
+    std::cout   << "Result for phi:\n"
+                << "    Phi Range: (" 
+                    << *phi_range.first << ", " 
+                    << *phi_range.second
+                << ")" 
+                << std::endl;
 
-    this->solution.block(0) = phi;
-    this->solution.block(1) = eta;
-    this->constraints.distribute(this->solution);
-    this->solution_old = this->solution;
+    std::cout   << "Results for eta:\n"
+                << "    Eta Range: (" 
+                    << *eta_range.first << ", " 
+                    << *eta_range.second
+                << ")" 
+                << std::endl;
 
+    this->phi_old_solution = this->phi_solution;
 }
 
 template<int dim>
@@ -638,17 +503,11 @@ void CahnHilliardEquation<dim> :: outputResults() const
     std::vector<std::string> old_names = {"phi_old", "eta_old"};
 
     dataOut.add_data_vector(this->dof_handler,
-                            this->solution,
-                            solution_names,
-                            interpretation);
+                            this->phi_solution,
+                            "phi");
     dataOut.add_data_vector(this->dof_handler,
-                            this->solution_old,
-                            old_names,
-                            interpretation);
-    dataOut.add_data_vector(this->dof_handler,
-                            this->system_rhs,
-                            rhs_names,
-                            interpretation);
+                            this->eta_solution,
+                            "eta");
     dataOut.build_patches();
 
     const std::string filename = ("data/solution-" 
@@ -664,7 +523,7 @@ void CahnHilliardEquation<dim> :: outputResults() const
 
     std::ofstream output(filename);
     dataOut.write_vtu(output);
-
+    
 };
 
 template<int dim> 
@@ -676,14 +535,9 @@ void CahnHilliardEquation<dim> :: run(
     this->setupSystem(params, totalSimTime);
     this->initializeValues();
 
-    this->assembleSystem();
-    this->solveSystem();
-    this->outputResults();
-    
-    for(uint i = 0; i < 10000; i++)
-    {   
+    for(uint i = 0; i < 100; i++){
         this->timestep_number++;
-        this->updateRHS();
+        this->assembleSystem();
         this->solveSystem();
         this->outputResults();
     }

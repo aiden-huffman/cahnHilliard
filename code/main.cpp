@@ -134,7 +134,6 @@ private:
     double          totalSimTime;
 
     double eps;
-    double theta;
 };
 
 template<int dim> 
@@ -151,7 +150,6 @@ CahnHilliardEquation<dim> :: CahnHilliardEquation()
     , timestep(1e-4)
     , time(timestep)
     , timestep_number(1)
-    , theta(0)
 {}
 
 template<int dim>
@@ -404,21 +402,11 @@ void CahnHilliardEquation<dim> :: assembleSystem()
             this->solution_old,
             cell_old_phi_values
         ); 
-       this->fe_values[phi].get_function_gradients(
-            this->solution_old,
-            cell_old_phi_grad
-        ); 
-       this->fe_values[phi].get_function_gradients(
-            this->solution_old,
-            cell_old_eta_grad
-        ); 
 
         for(uint q_index = 0 ;  q_index < this->quad_formula.size(); q_index++)
         {   
 
-            double          phi_old_x          = cell_old_phi_values[q_index];
-            Tensor<1,dim>   phi_old_grad       = cell_old_phi_grad[q_index];
-            Tensor<1,dim>   eta_old_grad       = cell_old_eta_grad[q_index];
+            double          phi_old_x       = cell_old_phi_values[q_index];
 
             for(uint i = 0; i < dofs_per_cell; i++)
             {
@@ -433,19 +421,18 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                     
                     // (0,1): kA
                     local_matrix(i,j)
-                        +=  this->theta * this->timestep 
+                        +=  this->timestep 
                         *   this->fe_values[phi].gradient(i,q_index)
                         *   this->fe_values[eta].gradient(j,q_index)
                         *   this->fe_values.JxW(q_index);
 
-                    // (1,0): - (2 M + epsilon^2 A)
+                    // (1,0): M - epsilon^2 A
                     local_matrix(i,j)
-                        -=  this->theta * this->fe_values[eta].value(i,q_index)
+                        +=  this->fe_values[eta].value(i,q_index)
                             * this->fe_values[phi].value(j,q_index)
                             * this->fe_values.JxW(q_index);
-
                     local_matrix(i,j)
-                        -=  this->theta * pow(this->eps,2)
+                        -=  pow(this->eps,2)
                             * this->fe_values[eta].gradient(i,q_index)
                             * this->fe_values[phi].gradient(j,q_index)
                             * this->fe_values.JxW(q_index); 
@@ -458,24 +445,9 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                 }
                 
                 // <\varphi_i, phi_old>
-                local_rhs(i)    +=  this->fe_values[phi].value(i,q_index)
-                                *   phi_old_x
-                                *   this->fe_values.JxW(q_index);
-                local_rhs(i)    -=  (1.-this->theta) * this->timestep
-                                *   this->fe_values[phi].gradient(i,q_index)
-                                *   eta_old_grad
-                                *   this->fe_values.JxW(q_index);
-
-                // 3 k <\nabla\varphi_i, \nabla\phi_old>
                 local_rhs(i)    +=  this->fe_values[eta].value(i,q_index)
                                 *   pow(phi_old_x,3)
                                 *   this->fe_values.JxW(q_index);
-                
-                local_rhs(i)    += (1.-this->theta) * pow(this->eps, 2)
-                                *   this->fe_values[eta].gradient(i,q_index)
-                                *   phi_old_grad
-                                *   this->fe_values.JxW(q_index);
-                                
 
                 this->constraints.distribute_local_to_global(
                     local_matrix,
@@ -705,15 +677,15 @@ void CahnHilliardEquation<dim> :: run(
     this->initializeValues();
 
     this->assembleSystem();
+    this->solveSystem();
+    this->outputResults();
     
     for(uint i = 0; i < 10000; i++)
     {   
-        std::cout << "Current sim time: " << this->time << std::endl;
-        this->solveSystem();
         this->timestep_number++;
-        this->time += this->timestep;
-        this->outputResults();
         this->updateRHS();
+        this->solveSystem();
+        this->outputResults();
     }
 }
 

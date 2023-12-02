@@ -149,7 +149,7 @@ CahnHilliardEquation<dim> :: CahnHilliardEquation()
                 update_gradients |
                 update_JxW_values)
     , dof_handler(triangulation)
-    , timestep(1e-7)
+    , timestep(1e-5)
     , time(timestep)
     , timestep_number(1)
 {}
@@ -393,6 +393,10 @@ void CahnHilliardEquation<dim> :: assembleSystem()
 
         cell->get_dof_indices(local_dof_indices);
 
+       this->fe_values.get_function_gradients(
+            this->phi_old_solution,
+            cell_old_phi_grad
+        ); 
        this->fe_values.get_function_values(
             this->phi_old_solution,
             cell_old_phi_values
@@ -402,12 +406,18 @@ void CahnHilliardEquation<dim> :: assembleSystem()
         {   
 
             double          phi_old_x       = cell_old_phi_values[q_index];
+            auto          phi_old_x_grad    = cell_old_phi_grad[q_index];
 
             for(uint i = 0; i < dofs_per_cell; i++)
             {
                  
-                local_eta_rhs(i)    +=  this->fe_values.shape_value(i,q_index)
-                                    *   pow(phi_old_x,3)
+                local_phi_rhs(i)    -=  this->timestep 
+                                    *   this->fe_values.shape_grad(i,q_index)
+                                    *   3. * pow(phi_old_x,2) * phi_old_x_grad
+                                    *   this->fe_values.JxW(q_index);
+                local_phi_rhs(i)    +=  3. * this->timestep
+                                    *   this->fe_values.shape_grad(i,q_index)
+                                    *   phi_old_x_grad
                                     *   this->fe_values.JxW(q_index);
 
                 this->constraints.distribute_local_to_global(
@@ -430,7 +440,7 @@ void CahnHilliardEquation<dim> :: solveSystem()
 
     SolverControl               solverControlInner(
                                     5000,
-                                    1e-10 * this->eta_rhs.l2_norm()
+                                    1e-10 * this->phi_rhs.l2_norm()
                                 );
     SolverCG<Vector<double>>    solverInner(solverControlInner);
 
@@ -439,14 +449,13 @@ void CahnHilliardEquation<dim> :: solveSystem()
                                     1e-8 
                                 );
     SolverGMRES<Vector<double>>    solverOuter(solverControlOuter);
-   
     
     const auto M = linear_operator(this->mass_matrix);
     const auto L = linear_operator(this->laplace_matrix);
 
     auto A = M;
     auto B = this->timestep * L;
-    auto C = M + pow(this->eps, 2) * L;
+    auto C = -1. * (2. * M + pow(this->eps, 2) * L);
     auto D = M;
 
     SparseILU<double> precon_A;
@@ -535,11 +544,13 @@ void CahnHilliardEquation<dim> :: run(
     this->setupSystem(params, totalSimTime);
     this->initializeValues();
 
-    for(uint i = 0; i < 100; i++){
+    for(uint i = 0; i < 1000; i++){
         this->timestep_number++;
+        this->time += this->timestep;
         this->assembleSystem();
         this->solveSystem();
         this->outputResults();
+        std::cout << "Sim time: " << this->time << std::endl;
     }
 }
 

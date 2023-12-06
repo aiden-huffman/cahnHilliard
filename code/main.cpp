@@ -147,7 +147,7 @@ CahnHilliardEquation<dim> :: CahnHilliardEquation()
                 update_gradients |
                 update_JxW_values)
     , dof_handler(triangulation)
-    , timestep(1e-6)
+    , timestep(1e-4)
     , time(timestep)
     , timestep_number(1)
 {}
@@ -566,17 +566,16 @@ void CahnHilliardEquation<dim> :: solveSystem()
 
     std::cout << "Solving system" << std::endl;
 
-    SolverControl               solverControlInner(
-                                    3000,
-                                    1e-8 * this->system_rhs.block(0).l2_norm()
-                                );
+    ReductionControl solverControlInner(2000, 1.0e-18, 1.0e-10);
     SolverCG<Vector<double>>    solverInner(solverControlInner);
 
     SolverControl               solverControlOuter(
-                                    3000,
+                                    10000,
                                     1e-8 * this->system_rhs.block(0).l2_norm()
                                 );
-    SolverCG<Vector<double>>    solverOuter(solverControlOuter);
+    SolverGMRES<
+        Vector<double>
+        >    solverOuter(solverControlOuter);
     
     // Decomposition of tangent matrix
     const auto A = linear_operator(system_matrix.block(0,0));
@@ -613,7 +612,8 @@ void CahnHilliardEquation<dim> :: solveSystem()
     const auto A_inv = inverse_operator(A, solverInner, precon_A);
     const auto S = schur_complement(A_inv,B,C,D);
      
-    const auto S_inv = inverse_operator(S, solverOuter);
+    const auto S_inv = inverse_operator(S, solverOuter, 
+                                        system_matrix.block(1,1));
      
     // Solve reduced block system
     // PackagedOperation that represents the condensed form of g
@@ -708,11 +708,10 @@ void CahnHilliardEquation<dim> :: run(
     for(uint i = 0; i < 10000; i++)
     {   
         this->timestep_number++;
+        this->assembleSystem();
         this->updateRHS();
         this->solveSystem();
-        if(i % 10 == 0){
-            this->outputResults();
-        }
+        this->outputResults();
     }
 }
 

@@ -1,0 +1,164 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx, biblatex} % Required for inserting images
+
+\usepackage{amsmath, amssymb}
+\usepackage{diffcoeff, cancel}
+
+\title{Cahn-Hilliard with Constant Mobility}
+\author{Aiden Huffman}
+\date{November 2023}
+
+\newcommand\ang[1]{\left\langle #1 \right\rangle}
+
+\begin{document}
+
+\maketitle
+
+\subsection*{Direct Solve}
+
+We consider the Cahn-Hilliard equation of the following form
+\begin{align}
+    \diffp{\phi}{t} &= \nabla^2\eta(\phi)\\
+    \eta(\phi) &= f'(\phi) - \epsilon^2\nabla^2 \phi
+\end{align}
+where $f(\phi) = (\phi^2-1)^2/4$. This can be reorganized as
+\begin{align}
+    \diffp{\phi}{t} &= \nabla^2 \left(
+        \phi^3-\phi - \epsilon^2\nabla^2 \phi
+    \right)\\
+                    &= \nabla^2 \phi^3  - \nabla^2 \phi - \epsilon\nabla^4 \phi
+\end{align}
+We will consider a backward Euler method, which can be easily modified into a
+Crank-Nicoholson scheme later.
+\begin{equation}
+    \phi^n - \phi^{n-1} - \Delta t\left(
+        \nabla^2 (\phi^n)^3  - \nabla^2 \phi^n - \epsilon^2\nabla^4 \phi^n
+    \right) = 0
+\end{equation}
+Multiplying on the left by a test function $\varphi$
+\begin{equation}
+    \ang{\varphi,\phi^n}_\Omega - \ang{\varphi, \phi^{n-1}}_{\Omega}
+    - \Delta t \left(
+        \ang{\varphi, \nabla^2(\phi^n)^3}_\Omega 
+        - \ang{\varphi, \nabla^2 \phi}_\Omega
+        - \epsilon^2\ang{\varphi,\nabla^4\phi}_\Omega
+    \right) = 0
+\end{equation}
+Integrating the more troublesome equations by parts
+\begin{equation}
+    \ang{\varphi,\phi^n}_\Omega - \ang{\varphi,\phi^{n-1}}_\Omega
+    + \Delta t \left(
+        \ang{\nabla\varphi, 3(\phi^n)^2\nabla\phi^n}_\Omega
+        - \ang{\nabla\varphi, \nabla\phi^n}_\Omega
+        + \ang{\nabla^2\varphi, \nabla^2\phi^n}_\Omega
+    \right) = 0 
+\end{equation}
+Assume that $\phi$ and $\varphi$ live in the same finite dimensional function
+space which is spanned by $\varphi_i$, then
+\begin{equation}
+    \ang{\varphi_i, \varphi_j}_\Omega + \Delta t\left(
+        \ang{\nabla^2 \varphi_i,\nabla^2\varphi_j}_\Omega
+        - \ang{\nabla \varphi_i,\nabla\varphi_j}_\Omega
+    \right) = \ang{\varphi_i, \varphi_j}\phi^{n-1}_j
+    - \Delta t\ang{\varphi_i, 3(\phi^{n-1})^2\nabla \phi^n}_\Omega
+\end{equation}
+Constructing the finite element space for this will require second order
+elements and is particularly expensive. We are better off trying to determine a
+way of implementing by introducing a dummy variable
+
+\subsection*{Newton with a Dummy}
+
+\begin{align}
+    \diffp{\phi}{t} &= \nabla^2 \phi^3
+                    - \nabla^2 \phi
+                    - \epsilon^2\nabla^2 \eta,\\
+    \eta            &= \nabla^2 \phi
+\end{align}
+We quickly compute the temporal discretization of the problem, substituting
+$k$ for $\Delta t$ which is less cumbersome,
+\begin{align}
+    &\phi^n - k(\nabla^2 (\phi^n)^3 - \nabla^2 \phi - \epsilon^2\nabla^2 \eta^n) 
+        = \phi^{n-1},\\
+    &\eta^n = \nabla^2 \phi^n.
+\end{align}
+projecting into the test space gives
+\begin{align}
+    &\ang{u, \phi^n}_\Omega -k\left(
+        \ang{-\nabla u, 3(\phi^n)^2\nabla\phi^n}_\Omega
+        + \ang{\nabla u, \nabla \phi^n}
+        + \epsilon^2\ang{\nabla u,\nabla \eta^n}
+    \right) = \ang{u, \phi^{n-1}}_\Omega\\
+    &\ang{u, \eta^n}_\Omega = \ang{\nabla u, \nabla \phi^n}_\Omega
+\end{align}
+To derive the Newton step let $\phi^n = \phi^{n,k} + \delta \phi^n$ then
+\begin{align}
+    &\ang{u, \phi^{n,k}}_\Omega + \ang{u,\delta\phi^n}_\Omega 
+        - k \ang{\nabla u, 3(\phi^{n,k}+\delta\phi^n)^2\nabla(\phi^{n,k}+\delta\phi^n)}_\Omega\\
+    &\hspace{4ex}+ k\ang{\nabla u, \nabla (\phi^{n,k} + \delta\phi^n} + k\epsilon^2\ang{\nabla u,\nabla \eta(\phi^{n,k} + \delta\phi^n)} = \ang{u, \phi^{n-1}}_\Omega
+\end{align}
+If we assume that $(\delta \phi^n)^2 \approx 0$ and
+$\delta\phi^n\nabla(\delta\phi^n)\approx 0$, we obtain
+\begin{align}
+    &\ang{u, \phi^{n,k}}_\Omega + \ang{u,\delta\phi^n}_\Omega\\
+    &\hspace{4ex}- k \ang{\nabla u, 3(\phi^{n,k})^2\nabla(\phi^{n,k})}\\
+    &\hspace{4ex}- k \ang{\nabla u, 3(\phi^{n,k})^2\nabla(\delta \phi^n)}_\Omega\\ 
+    &\hspace{4ex}- k \ang{\nabla u, 6(\delta\phi^n)\phi^{n,k}\nabla\phi^{n,k}}_\Omega\\
+    &\hspace{4ex}+ k\ang{\nabla u, \nabla \phi^{n,k}}_\Omega\\ 
+    &\hspace{4ex}+ k\ang{\nabla u, \nabla\delta\phi^n}_\Omega\\ 
+    &\hspace{4ex}+ k\epsilon^2\ang{\nabla u,\nabla \eta(\phi^{n,k})}_\Omega\\
+    &\hspace{4ex}+ k\epsilon^2\ang{\nabla u, \nabla\eta(\phi^{n,k})}\\
+    &\hspace{4ex}+ k\epsilon^2\ang{\nabla u, \nabla\eta'(\phi^{n,k})\delta\phi^n)}_\Omega\\
+    &\hspace{4ex}= \ang{u, \phi^{n-1}}_\Omega
+\end{align}
+Constructing the linear system for $\delta\phi^n$ we find that
+\begin{align}
+    &\ang{\varphi_i, \varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\ang{\nabla \varphi_i, 3(\phi^{n,k})^2\nabla\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\ang{\nabla \varphi_i, (6\phi^{n,k}\nabla\phi^{n,k})\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}+ k\ang{\nabla \varphi_i, \nabla\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}+ k\epsilon^2\ang{\nabla\varphi_i, \nabla\eta'(\phi^{n,k})\varphi_j}\delta\phi^n_j\\
+    &= \ang{\varphi_i, \phi^{n-1}}\\
+    &\hspace{4ex}-\ang{\varphi_i, \varphi_j}\phi^{n,k}_j\\
+    &\hspace{4ex}+k\ang{\nabla\varphi_i, 3(\phi^{n,k})^2\nabla\phi^{n,k}}\\
+    &\hspace{4ex}-k\ang{\nabla\varphi_i, \nabla\varphi_j}\phi^{n,k}_j\\
+    &\hspace{4ex}-k\epsilon^2\ang{\nabla\varphi_i,\eta(\phi^{n,ki})}
+\end{align}
+By inverting the linear system we can find $\delta\phi^n$ and define our update
+$\phi^{n,k+1} = \phi^{n,k} + \alpha\delta \phi^n$; however, this raises an obvious
+question, what the heck is $\eta'(\phi^{n,k})$? Being entirely unrigourous,
+in part because the last time I saw this sort of functional analysis was several
+years ago we have something like this
+\begin{align}
+    \eta(\phi+\delta \phi) &= \nabla^2\phi + \nabla^2 \delta \phi\\
+    &= \eta(\phi) + \eta'(\phi)\delta\phi
+\end{align}
+The take away being that $\nabla^2$ is a linear operator, so it's linearization
+is itself.
+\begin{align}
+    &\ang{\varphi_i, \varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\ang{\nabla \varphi_i, 3(\phi^{n,k})^2\nabla\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\ang{\nabla \varphi_i, (6\phi^{n,k}\nabla\phi^{n,k})\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}+ k\ang{\nabla \varphi_i, \nabla\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}+ k\epsilon^2\ang{\nabla\varphi_i, \nabla^3\varphi_j}\delta\phi^n_j\\
+    &= \ang{\varphi_i, \phi^{n-1}}\\
+    &\hspace{4ex}-\ang{\varphi_i, \varphi_j}\phi^{n,k}_j\\
+    &\hspace{4ex}+k\ang{\nabla\varphi_i, 3(\phi^{n,k})^2\nabla\phi^{n,k}}\\
+    &\hspace{4ex}-k\ang{\nabla\varphi_i, \nabla\varphi_j}\phi^{n,k}_j\\
+    &\hspace{4ex}-k\epsilon^2\ang{\nabla\varphi_i,\eta(\phi^{n,ki})}
+\end{align}
+integrating by parts we are actually left in the same situation as before
+\begin{align}
+    &\ang{\varphi_i, \varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\ang{\nabla \varphi_i, 3(\phi^{n,k})^2\nabla\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\ang{\nabla \varphi_i, (6\phi^{n,k}\nabla\phi^{n,k})\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}+ k\ang{\nabla \varphi_i, \nabla\varphi_j}\delta\phi^n_j\\
+    &\hspace{4ex}- k\epsilon^2\ang{\nabla^2\varphi_i, \nabla^2\varphi_j}\delta\phi^n_j\\
+    &= \ang{\varphi_i, \phi^{n-1}}\\
+    &\hspace{4ex}-\ang{\varphi_i, \varphi_j}\phi^{n,k}_j\\
+    &\hspace{4ex}+k\ang{\nabla\varphi_i, 3(\phi^{n,k})^2\nabla\phi^{n,k}}\\
+    &\hspace{4ex}-k\ang{\nabla\varphi_i, \nabla\varphi_j}\phi^{n,k}_j\\
+    &\hspace{4ex}-k\epsilon^2\ang{\nabla\varphi_i,\eta(\phi^{n,ki})}
+\end{align}
+\end{document}

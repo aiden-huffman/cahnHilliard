@@ -333,7 +333,7 @@ template<int dim>
 void CahnHilliardEquation<dim> :: initializeValues()
 {   
    
-    std::cout   << "Initializing values for C" << std::endl;
+    std::cout   << "Initializing values for phi" << std::endl;
 
     VectorTools::project(this->dof_handler,
                          this->constraints,
@@ -466,15 +466,16 @@ void CahnHilliardEquation<dim> :: assembleSystem()
                                 *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
                                 *   this->fe_values.JxW(q_index);
 
-                this->constraints.distribute_local_to_global(
-                    local_matrix,
-                    local_rhs,
-                    local_dof_indices,
-                    this->system_matrix,
-                    this->system_rhs
-                );
             }
         }
+
+        this->constraints.distribute_local_to_global(
+            local_matrix,
+            local_rhs,
+            local_dof_indices,
+            this->system_matrix,
+            this->system_rhs
+        );
     }
 
     std::cout << "Assembly completed" << std::endl;
@@ -548,13 +549,15 @@ void CahnHilliardEquation<dim> :: updateRHS()
                                 *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
                                 *   this->fe_values.JxW(q_index);
 
-                this->constraints.distribute_local_to_global(
-                    local_rhs,
-                    local_dof_indices,
-                    this->system_rhs
-                );
             }
         }
+
+        this->constraints.distribute_local_to_global(
+            local_rhs,
+            local_dof_indices,
+            this->system_rhs
+        );
+
     }
 
     std::cout << "Update completed" << std::endl;
@@ -571,7 +574,7 @@ void CahnHilliardEquation<dim> :: solveSystem()
 
     SolverControl               solverControlOuter(
                                     10000,
-                                    1e-8 * this->system_rhs.block(0).l2_norm()
+                                    1e-8 * this->system_rhs.l2_norm()
                                 );
     SolverGMRES<
         Vector<double>
@@ -708,7 +711,6 @@ void CahnHilliardEquation<dim> :: run(
     for(uint i = 0; i < 10000; i++)
     {   
         this->timestep_number++;
-        this->assembleSystem();
         this->updateRHS();
         this->solveSystem();
         this->outputResults();

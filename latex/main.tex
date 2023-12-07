@@ -5,6 +5,8 @@
 \usepackage{amsmath, amssymb}
 \usepackage{diffcoeff, cancel}
 
+\newcommand\ang[1]{\left\langle #1 \right\rangle}
+
 \title{Cahn-Hilliard with Deal.II}
 \author{Aiden Huffman}
 \date{October 2023}
@@ -13,58 +15,43 @@
 
 \maketitle
 
-For our purposes, the Cahn-Hilliard equation is described by the following
-partial differential equation
+We use the linearly stable splitting scheme described in Kim
 \begin{align}
-    \diffp{\phi}{t} &= \nabla\cdot(M(\phi)\nabla\eta)\\
-    \eta(\phi) &= F'(\phi)-\epsilon^2 \nabla^2 \phi\\
+    \phi^n &= \phi^{n-1} + k \left[\nabla^2 \eta + \nabla^2 \left(f'(\phi^{n-1}) - 2\phi^{n-1}\right)\right]\\
+    \eta &= 2\phi^n - \epsilon^2 \nabla^2\phi^n
 \end{align}
-where
+where $f'(\phi^{n-1}) = (\phi^{n-1})^3 - \phi^{n-1}$.
+After projecting into the test space, we obtain
+\begin{align}
+    \ang{\varphi, \phi^n} &= \ang{\varphi,\phi^{n-1}} - k \ang{\nabla\varphi, \nabla\eta} - k\ang{\nabla \varphi, \nabla f'(\phi^{n-1})} + 2k\ang{\nabla \varphi, \nabla \phi^{n-1}}\\
+    \ang{\varphi, \eta} &= 2\ang{\varphi,\phi^n} + \epsilon^2 \ang{\nabla\varphi_i, \nabla\phi^n}
+\end{align}
+If $\varphi$ is assumed to be from a finite dimensional test space, and $\phi^n,\, \eta$ are also in the test space then we obtain a finite dimensional system of equations
+\begin{align}
+    \ang{\varphi_i, \varphi_j}\phi^n_j &= \ang{\varphi_i,\phi^{n-1}} - k \ang{\nabla\varphi_i, \nabla\varphi_j}\eta_j - k\ang{\nabla \varphi_i,\nabla f'(\phi^{n-1})} + 2k\ang{\nabla \varphi_i, \nabla \phi^{n-1}}\\
+    \ang{\varphi_i, \varphi_j}\eta_j &= 2\ang{\varphi_i,\varphi_j}\phi^n_j + \epsilon^2 \ang{\nabla\varphi_i, \nabla\varphi_j}\phi^n_j
+\end{align}
+Noting that $M = \ang{\varphi_i, \varphi_j}$ is the mass matrix and $A = \ang{\nabla\varphi_i, \nabla\varphi_j}$ is the stiffness or Laplace matrix we obtain
+\begin{align}
+    M\phi^n &= \ang{\varphi_i,\phi^{n-1}} - k A\eta - k\ang{\nabla \varphi_i,\nabla f'(\phi^{n-1})} + 2k\ang{\nabla \varphi_i, \nabla \phi^{n-1}}\\
+    M\eta_j &= 2M\phi^n + \epsilon^2 A\phi^n
+\end{align}
+which can be compactly represented with the following linear system
 \begin{equation}
-    F(\phi) = \frac{1}{4}(\phi^2-1)^2,\qquad M(\phi) = 1-\phi^2
+    \begin{bmatrix}
+        M & kA\\
+        -(2M + \epsilon^2 A) & M
+    \end{bmatrix}\begin{bmatrix}
+        \phi^n\\
+        \eta
+    \end{bmatrix} = \begin{bmatrix}
+        F(\phi^{n-1})\\
+        0
+    \end{bmatrix}
 \end{equation}
-so that
+where
 \begin{align}
-    \diffp{\phi}{t} &= \nabla\cdot((1-\phi^2)\nabla\eta)\\
-    \eta(\phi) &= \phi(\phi^2-1) - \epsilon^2\nabla^2\phi 
-\end{align}
-We'll begin by solving this in the simplest way possible. In particular, a first
-order forward Euler method. Before this, we will replace the $\phi$'s in the
-system with $c$ since we frequently use $\phi$ to represent functions in the
-trial space. As a consequence, our system takes the form:
-\begin{align}
-\frac{c^{n+1}-c^{n}}{\Delta t} &= \nabla\cdot((1-(c^n)^2)\nabla\eta^n))\\
-\eta^n &= c^n((c^n)^2-1) - \epsilon^2 \nabla^2 c^n
-\end{align}
-Notice that we can solve for $\eta^n$ before finding $c^{n+1}$ and provides a
-reasonable method for updating the system. Projecting into the test space, we
-have
-\begin{align}
-    (\phi, c^{n+1})_\Omega  &= (\phi, c^n)_\Omega
-                            + \Delta t (
-                                \phi,\,
-                                \nabla\cdot(1-(c^n)^2)\nabla(\eta^n)
-                            )_\Omega,\\
-    (\phi, \eta^n)_\Omega   &= (\phi, c((c^n)^2-1)))_\Omega 
-                            - \epsilon^2(\phi,\nabla^2 c^n).
-\end{align}
-After integrating by parts, and assuming periodic boundary conditions
-\begin{align}
-    (\phi, c^{n+1})_\Omega  &= (\phi, c^n)_\Omega
-                            - \Delta t (
-                                \nabla \phi,\,
-                                (1-(c^n)^2)\nabla(\eta^n)
-                            )_\Omega,\\
-    (\phi, \eta^n)_\Omega   &= (\phi, c((c^n)^2-1)))_\Omega 
-                            + \epsilon^2(\nabla \phi,\nabla c^n).
-\end{align}
-If we assume that the solution lives in the trial space, and take some finite
-basis of the function space we can replace $(\phi, c^{n})$ with a mass matrix,
-$(\nabla \phi, \nabla c^n)$ with a laplace matrix and perform similar
-substitutions for $\eta$. If $M$ and $A$ represent the two matrices, the system
-is approximately governed by
-\begin{align}
-    MC^{n+1} &= MC^n - \Delta t (\nabla \phi_i, F(c^n, \eta^n))\\
-    M\eta^n &= \epsilon^2 A C^n + (\phi, G(c^n))
+    F_i(\phi^{n-1}) &= \ang{\varphi_i, \phi^{n-1}} - k\ang{\nabla \varphi_i, \nabla (\phi^{n-1})^3} + k\ang{\nabla\varphi_i, \nabla \phi^{n-1}} + 2k\ang{\nabla\varphi_i, \nabla\phi^{n-1}}\\
+    &= \ang{\varphi_i, \phi^{n-1}} - k\ang{\nabla\varphi_i, 3(\phi^{n-1})^2\nabla\phi^{n-1}} + 3k\ang{\nabla \varphi_i, \nabla \phi^{n-1}}
 \end{align}
 \end{document}

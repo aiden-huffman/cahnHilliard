@@ -8,6 +8,8 @@
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/grid/grid_tools.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
+#include <deal.II/lac/linear_operator.h>
+#include <deal.II/lac/schur_complement.h>
 #include <deal.II/lac/sparsity_pattern.h>
 #include <deal.II/numerics/vector_tools.h>
 #include <deal.II/numerics/matrix_tools.h>
@@ -15,20 +17,29 @@
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
-
 #include <deal.II/fe/fe_update_flags.h>
 #include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/fe_system.h>
 
 #include <deal.II/dofs/dof_handler.h>
 #include <deal.II/dofs/dof_tools.h>
 
 #include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_gmres.h>
 #include <deal.II/lac/solver_control.h>
 #include <deal.II/lac/vector.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/precondition.h>
+#include <deal.II/lac/precondition_selector.h>
+#include <deal.II/lac/sparse_ilu.h>
 #include <deal.II/lac/affine_constraints.h>
+#include <deal.II/lac/linear_operator_tools.h>
+#include <deal.II/lac/block_vector.h>
+#include <deal.II/lac/block_sparse_matrix.h>
 
+#include <deal.II/dofs/dof_renumbering.h>
+
+#include <ostream>
 #include <random>
 #include <unordered_map>
 #include <fstream>
@@ -36,469 +47,675 @@
 namespace cahnHilliard {
     using namespace dealii;
 
-    template<int dim> class CahnHilliardEquation
-    {
+template<int dim>
+class InitialValuesC : public Function<dim>
+{
     public:
-        CahnHilliardEquation(
-            const std::unordered_map<std::string, double>  params,
-            const double totalSimTime);
-        void run();
+        InitialValuesC(double eps);
+        virtual double value(
+            const Point<dim> &p,
+            const unsigned int component = 0
+        ) const override;
 
     private:
-        void setupSystem(const std::unordered_map<std::string, double> params,
-                          const double                                  totalSimTime);
-        void initializeValues();
-        void constructRightHandEta();
-        void constructRightHandC();
-        void solveC();
-        void solveEta();
-        void outputResults() const;
 
-        Triangulation<dim>  triangulation;
-        FE_Q<dim>           fe;
-        DoFHandler<dim>     dofHandler;
-
-        AffineConstraints<double>   constraints;
-
-        SparsityPattern         sparsityPattern;
-        SparseMatrix<double>    massMatrix;
-        SparseMatrix<double>    laplaceMatrix;
-        SparseMatrix<double>    matrixC;
-        SparseMatrix<double>    matrixEta;
-
-        Vector<double> solutionC;
-        Vector<double> solutionEta;
-        Vector<double> oldSolutionC;
-        Vector<double> systemRightHandSideC;
-        Vector<double> systemRightHandSideEta;
-        
-        Vector<double>  cellRightHandSideEta;
-        Vector<double>  cellRightHandSideC;
-
-        double          timeStep;
-        double          time;
-        unsigned int    timestepNumber;
-        double          totalSimTime;
+        mutable std::default_random_engine  generator;
+        mutable std::normal_distribution<double>    distribution;
 
         double eps;
-    };
+};
 
-    template<int dim> CahnHilliardEquation<dim> 
-        :: CahnHilliardEquation(std::unordered_map<std::string, double> params,
-                                double totalSimTime)
-            : fe(1)
-            , dofHandler(triangulation)
-            , timeStep(1. / 256.)
-            , time(timeStep)
-            , timestepNumber(1)
-    {
-        this->setupSystem(params,
-                          totalSimTime);
-    }
-
-    template<int dim> void CahnHilliardEquation<dim> :: setupSystem(
-        const std::unordered_map<std::string, double> params,
-        const double                                  totalSimTime
-    )
-    {
-
-        std::cout << "Passing parameters:" << std::endl;
-        for(auto it=params.begin(); it!=params.end(); it++){
-            std::cout   << "    "   << it->first
-                        << ": "     << it->second
-                        << std::endl;
-        }
-
-        this->eps = params.at("eps");
-        this->totalSimTime = totalSimTime;
-        
-        std::cout << "Building mesh" << std::endl;
-
-        GridGenerator::hyper_cube(
-            this->triangulation,
-            -1, 1,
-            true
-        );
-
-        std::cout   << "Connecting nodes to neighbours due to periodic boundary"
-                    << " conditions."
-                    << std::endl;
-
-        std::vector<GridTools::PeriodicFacePair<
-            typename Triangulation<dim>::cell_iterator>
-        > matchedPairsX;
-
-        std::vector<GridTools::PeriodicFacePair<
-            typename Triangulation<dim>::cell_iterator>
-        > matchedPairsY;
-
-        GridTools::collect_periodic_faces(this->triangulation,
-                                          0, 1, 0, matchedPairsX);
-        
-        GridTools::collect_periodic_faces(this->triangulation,
-                                          2, 3, 1, matchedPairsY);
-
-        triangulation.add_periodicity(matchedPairsX);
-        triangulation.add_periodicity(matchedPairsY);
-
-        std::cout << "Neighbours updated to reflect periodicity" << std::endl;
+template<int dim> 
+InitialValuesC<dim>::InitialValuesC(double eps)
+    : Function<dim>(2)
+    , eps(eps)
+{}
     
-        std::cout << "Refining grid" << std::endl;
-        triangulation.refine_global(8);
-
-        std::cout   << "Mesh generated...\n"
-                    << "Active cells: " << triangulation.n_active_cells()
-                    << std::endl;
-
-        std::cout   << "Indexing degrees of freedom..."
-                    << std::endl;
-
-        this->dofHandler.distribute_dofs(fe);
-
-        std::cout   << "Number of degrees of freedom: "
-                    << dofHandler.n_dofs()
-                    << std::endl;
-
-        std::cout   << "Building sparsity pattern..."
-                    << std::endl;
-
-        std::vector<GridTools::PeriodicFacePair<
-            typename DoFHandler<dim>::cell_iterator>
-        > periodicity_vectorX;
-
-        std::vector<GridTools::PeriodicFacePair<
-            typename DoFHandler<dim>::cell_iterator>
-        > periodicity_vectorY;
-
-        GridTools::collect_periodic_faces(this->dofHandler,
-                                          0,1,0,periodicity_vectorX);
-        GridTools::collect_periodic_faces(this->dofHandler,
-                                          2,3,1,periodicity_vectorY);
-
-        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
-                                                        this->constraints);
-        DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
-                                                        this->constraints);
-
-        constraints.close();
-
-        DynamicSparsityPattern dsp(
-            dofHandler.n_dofs(),
-            dofHandler.n_dofs()
-        );
-        DoFTools::make_sparsity_pattern(dofHandler,
-                                        dsp,
-                                        this->constraints);
-        sparsityPattern.copy_from(dsp);
-        sparsityPattern.compress();
-
-        std::cout   << "Reinitializing matices based on new pattern..."
-                    << std::endl;
-
-        massMatrix.reinit(sparsityPattern);
-        laplaceMatrix.reinit(sparsityPattern);
-        matrixC.reinit(sparsityPattern);
-        matrixEta.reinit(sparsityPattern);
-
-        std::cout   << "Filling entries for mass and laplace matrix..."
-                    << std::endl;
-
-        MatrixCreator::create_mass_matrix(
-            dofHandler,
-            QGauss<dim>(fe.degree+1),
-            massMatrix
-        );
-
-        MatrixCreator::create_laplace_matrix(
-            dofHandler,
-            QGauss<dim>(fe.degree+1),
-            massMatrix
-        );
-
-        std::cout   << "Initializing vectors..."
-                    << std::endl;
-
-        this->solutionC.reinit(dofHandler.n_dofs());
-        this->solutionEta.reinit(dofHandler.n_dofs());
-        this->oldSolutionC.reinit(dofHandler.n_dofs());
-        this->systemRightHandSideC.reinit(dofHandler.n_dofs());
-        this->systemRightHandSideEta.reinit(dofHandler.n_dofs());
-
-        std::cout   << "\nCompleted construction\n"
-                    << std::endl;
-
-        std::cout   << "Building constraints from periodicity..."
-                    << std::endl;
-
-
-        std::cout   << "Periodicity constraints added"
-                    << std::endl;
-        
-        // Initialize memory for cell values and RHS
-        this->cellRightHandSideEta.reinit(fe.n_dofs_per_cell());
-        this->cellRightHandSideC.reinit(fe.n_dofs_per_cell());
-
-    }
-
-    template<int dim> class InitialValuesC : public Function<dim>
-    {
-        public:
-            InitialValuesC(double eps);
-            virtual double value(
-                const Point<dim> &p,
-                const unsigned int component = 0
-            ) const override;
-
-        private:
-
-            mutable std::default_random_engine  generator;
-            mutable std::normal_distribution<double>    distribution;
-
-            double eps;
-    };
-
-    template<int dim> InitialValuesC<dim>::InitialValuesC(double eps)
-        : generator()
-        , distribution(0,0.25)
-        , eps(eps)
-    {}
-    
-    template<int dim> double InitialValuesC<dim> :: value(
-        const Point<dim> &p,
-        const unsigned int i /*component*/
-    ) const
+template<int dim>
+double InitialValuesC<dim> :: value(
+    const Point<dim> &p,
+    const unsigned int component
+) const
+{
+    if(component == 0)
     {
         return std::tanh(
             (p.norm()-0.25) / (std::sqrt(2)*this->eps)
         ); 
+    } else {
+         return 0.0;
     }
+}
 
-    template<int dim> void CahnHilliardEquation<dim> :: initializeValues()
-    {   
-       
-        std::cout   << "Initializing values for C" << std::endl;
+template<int dim>
+class CahnHilliardEquation
+{
+public:
+    CahnHilliardEquation();
+    void run(
+        const std::unordered_map<std::string, double> params,
+        const double                                  totalSimTime
+    );
 
-        VectorTools::project(this->dofHandler,
-                             this->constraints,
-                             QGauss<dim>(fe.degree + 1),
-                             InitialValuesC<dim>(this->eps),
-                             this->oldSolutionC);
-        this->constraints.distribute(this->oldSolutionC);
+private:
+    void setupSystem(
+            const std::unordered_map<std::string, double> params,
+            const double                                  totalSimTime
+    );
+    void setupTriang();
+    void setupDoFs();
+    void reinitLinearSystem();
+    void initializeValues();
 
-        double* maxC = std::max_element(oldSolutionC.begin(),
-                                        oldSolutionC.end());
-        double* minC = std::min_element(oldSolutionC.begin(),
-                                        oldSolutionC.end());
+    void assembleSystem();
+    void updateRHS();
+    void solveSystem();
 
-        std::cout   << "Initial values propagated:\n"
-                    << "    Range: (" 
-                        << *minC << ", " 
-                        << *maxC
-                    << ")" 
-                    << std::endl;
-
-    }
-
-    template<int dim> void CahnHilliardEquation<dim>
-        :: solveEta()
-    {   
-        SolverControl               solverControl(
-                                        1000,
-                                        1e-8 * systemRightHandSideEta.l2_norm()
-                                    );
-        SolverCG<Vector<double>>    cg(solverControl);
-
-        this->constraints.condense(this->massMatrix,
-                                   this->systemRightHandSideEta);
-        cg.solve(
-            this->massMatrix,
-            this->solutionEta,
-            this->systemRightHandSideEta,
-            PreconditionIdentity()
-        );
-        this->constraints.distribute(this->solutionEta);
-
-        std::cout   << "    Eta solved: "
-                    << solverControl.last_step()
-                    << " CG iterations."
-                    << std::endl;
-    }
-
-    template<int dim> void CahnHilliardEquation<dim>
-        :: solveC()
-    {   
-        SolverControl               solverControl(
-                                        1000,
-                                        1e-8 * systemRightHandSideC.l2_norm()
-                                    );
-        SolverCG<Vector<double>>    cg(solverControl);
-
-        this->constraints.condense(this->massMatrix,
-                                   this->systemRightHandSideC);
-        cg.solve(
-            this->massMatrix,
-            this->solutionC,
-            this->systemRightHandSideC,
-            PreconditionIdentity()
-        );
-        this->constraints.distribute(this->solutionC);
-
-        std::cout   << "    C solved: "
-                    << solverControl.last_step()
-                    << " CG iterations."
-                    << std::endl;
-    }
+    void outputResults() const;
     
-    template<int dim> void CahnHilliardEquation<dim> 
-        :: outputResults() const
+    uint                degree;
+    Triangulation<dim>  triangulation;
+    FESystem<dim>       fe;
+    QGauss<dim>         quad_formula;
+    FEValues<dim>       fe_values;
+    DoFHandler<dim>     dof_handler;
+
+    AffineConstraints<double>   constraints;
+
+    BlockSparsityPattern        sparsity_pattern;
+    BlockSparseMatrix<double>   system_matrix;
+    BlockVector<double>         solution;
+    BlockVector<double>         solution_old;
+    BlockVector<double>         system_rhs;
+
+    double          timestep;
+    double          time;
+    unsigned int    timestep_number;
+    double          totalSimTime;
+
+    double eps;
+};
+
+template<int dim> 
+CahnHilliardEquation<dim> :: CahnHilliardEquation()
+    : degree(1)
+    , fe(FE_Q<dim>(degree),2)
+    , quad_formula(degree+1)
+    , fe_values(this->fe,
+                this->quad_formula,
+                update_values |
+                update_gradients |
+                update_JxW_values)
+    , dof_handler(triangulation)
+    , timestep(1e-4)
+    , time(timestep)
+    , timestep_number(1)
+{}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: setupTriang(){
+
+    std::cout << "Building mesh" << std::endl;
+
+    GridGenerator::hyper_cube(
+        this->triangulation,
+        -1, 1,
+        true
+    );
+
+    std::cout   << "Connecting nodes to neighbours due to periodic boundary"
+                << " conditions."
+                << std::endl;
+    
+    if(dim == 2){
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_X;
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_Y;
+
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          0, 1, 0, matched_pairs_X);
+        
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          2, 3, 1, matched_pairs_Y);
+
+        triangulation.add_periodicity(matched_pairs_X);
+        triangulation.add_periodicity(matched_pairs_Y);
+
+    } else if (dim == 3) {
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_X;
+
+        std::vector<GridTools::PeriodicFacePair<
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_Y;
+        
+        std::vector<GridTools::PeriodicFacePair<
+            typename Triangulation<dim>::cell_iterator>
+        > matched_pairs_Z;
+
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          0, 1, 0, matched_pairs_X);
+        
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          2, 3, 1, matched_pairs_Y);
+
+        GridTools::collect_periodic_faces(this->triangulation,
+                                          4, 5, 2, matched_pairs_Z);
+
+        triangulation.add_periodicity(matched_pairs_X);
+        triangulation.add_periodicity(matched_pairs_Y);
+        triangulation.add_periodicity(matched_pairs_Z);
+    }
+
+    std::cout << "Neighbours updated to reflect periodicity" << std::endl;
+
+    std::cout << "Refining grid" << std::endl;
+    triangulation.refine_global(8);
+
+    std::cout   << "Mesh generated...\n"
+                << "Active cells: " << triangulation.n_active_cells()
+                << std::endl;
+
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: setupDoFs()
+{
+
+    std::cout   << "Indexing degrees of freedom..."
+                << std::endl;
+
+    this->dof_handler.distribute_dofs(fe);
+    DoFRenumbering::component_wise(this->dof_handler);
+    
+    const std::vector<types::global_dof_index> dofs_per_component =
+        DoFTools::count_dofs_per_fe_component(this->dof_handler);
+    
+    const std::vector<types::global_dof_index> block_sizes = 
+        {dofs_per_component[0],
+         dofs_per_component[1]};
+
+    std::cout   << "Number of degrees of freedom: "
+                << dof_handler.n_dofs()
+                << std::endl;
+    std::cout   << "Per block:\n"
+                << "    Block 0: " << dofs_per_component[0] << std::endl
+                << "    Block 1: " << dofs_per_component[1] << std::endl;
+
+    std::cout   << "Adding periodicity considerations to degrees of freedom"
+                << " and constraints"
+                << std::endl;
+
+    std::vector<GridTools::PeriodicFacePair<
+        typename DoFHandler<dim>::cell_iterator>
+    > periodicity_vectorX;
+
+    std::vector<GridTools::PeriodicFacePair<
+        typename DoFHandler<dim>::cell_iterator>
+    > periodicity_vectorY;
+
+    GridTools::collect_periodic_faces(this->dof_handler,
+                                      0,1,0,periodicity_vectorX);
+    GridTools::collect_periodic_faces(this->dof_handler,
+                                      2,3,1,periodicity_vectorY);
+
+    DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorX,
+                                                    this->constraints);
+    DoFTools::make_periodicity_constraints<dim,dim>(periodicity_vectorY,
+                                                    this->constraints);
+
+    std::cout   << "Closing constraints" << std::endl;
+    this->constraints.close();
+
+    std::cout   << "Building sparsity pattern..."
+                << std::endl;
+
+    BlockDynamicSparsityPattern dsp(block_sizes, block_sizes);
+    DoFTools::make_sparsity_pattern(
+        this->dof_handler,
+        dsp,
+        this->constraints);
+
+    sparsity_pattern.copy_from(dsp);
+    sparsity_pattern.compress();
+    
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: setupSystem(
+    const std::unordered_map<std::string, double> params,
+    const double                                  totalSimTime
+)
+{
+
+    std::cout << "Passing parameters:" << std::endl;
+    for(auto it=params.begin(); it!=params.end(); it++){
+        std::cout   << "    "   << it->first
+                    << ": "     << it->second
+                    << std::endl;
+    }
+
+    this->eps = params.at("eps");
+    this->totalSimTime = totalSimTime;
+    
+    this->setupTriang();
+    this->setupDoFs();
+    this->reinitLinearSystem();
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: reinitLinearSystem()
+{
+    std::cout   << "Reinitializing the objects for the linear system"
+                << std::endl;
+
+    const std::vector<types::global_dof_index> dofs_per_component =
+        DoFTools::count_dofs_per_fe_component(this->dof_handler);
+    
+    const std::vector<types::global_dof_index> block_sizes = 
+        {dofs_per_component[0],
+         dofs_per_component[1]};
+
+    this->system_matrix.reinit(sparsity_pattern);
+    this->solution.reinit(block_sizes);
+    this->solution_old.reinit(block_sizes);
+    this->system_rhs.reinit(block_sizes);
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: initializeValues()
+{   
+   
+    std::cout   << "Initializing values for phi" << std::endl;
+
+    VectorTools::project(this->dof_handler,
+                         this->constraints,
+                         QGauss<dim>(fe.degree + 1),
+                         InitialValuesC<dim>(this->eps),
+                         this->solution_old);
+
+    this->constraints.distribute(this->solution_old);
+    
+    auto phi_range = std::minmax_element(this->solution_old.block(0).begin(),
+                                       this->solution_old.block(0).end());
+    auto eta_range = std::minmax_element(this->solution_old.block(1).begin(),
+                                       this->solution_old.block(1).end());
+
+
+    std::cout   << "Initial values propagated:\n"
+                << "    Phi Range: (" 
+                    << *phi_range.first << ", " 
+                    << *phi_range.second
+                << ")" 
+                << std::endl;
+    std::cout   << "    Eta Range: (" 
+                    << *eta_range.first << ", " 
+                    << *eta_range.second
+                << ")" 
+                << std::endl;
+
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: assembleSystem()
+{
+
+    std::cout << "Assembling system" << std::endl;
+
+    this->system_matrix = 0;
+    this->system_rhs    = 0;
+
+    const unsigned int dofs_per_cell = this->fe.n_dofs_per_cell();
+
+    FullMatrix<double>  local_matrix(
+        dofs_per_cell, 
+        dofs_per_cell
+    );
+    Vector<double>      local_rhs(dofs_per_cell);
+
+    std::vector<double>          cell_old_phi_values(this->quad_formula.size());
+    std::vector<Tensor<1,dim>>   cell_old_phi_grad(this->quad_formula.size());
+
+    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+    const FEValuesExtractors::Scalar    phi(0);
+    const FEValuesExtractors::Scalar    eta(1);
+
+    for(const auto &cell : dof_handler.active_cell_iterators())
     {
 
-        DataOut<dim> dataOut;
+        this->fe_values.reinit(cell);
+        local_matrix    = 0;
+        local_rhs       = 0;
 
-        dataOut.attach_dof_handler(this->dofHandler);
-        dataOut.add_data_vector(this->solutionC, "C");
-        dataOut.add_data_vector(this->solutionEta, "Eta");
-        dataOut.build_patches();
+        cell->get_dof_indices(local_dof_indices);
 
-        const std::string filename = ("data/solution-" 
-                                     + std::to_string(this->timestepNumber) 
-                                     + ".vtu");
+       this->fe_values[phi].get_function_values(
+            this->solution_old,
+            cell_old_phi_values
+        ); 
+       this->fe_values[phi].get_function_gradients(
+            this->solution_old,
+            cell_old_phi_grad
+        ); 
 
-        DataOutBase::VtkFlags vtk_flags;
-        vtk_flags.compression_level = DataOutBase::VtkFlags::ZlibCompressionLevel::best_speed;
-        dataOut.set_flags(vtk_flags);
+        for(uint q_index = 0 ;  q_index < this->quad_formula.size(); q_index++)
+        {   
 
-        std::ofstream output(filename);
-        dataOut.write_vtu(output);
+            double          phi_old_x       = cell_old_phi_values[q_index];
+            Tensor<1,dim>   phi_old_x_grad  = cell_old_phi_grad[q_index];
 
-    };
-
-    template<int dim> void CahnHilliardEquation<dim>
-        :: run()
-    {
-        this->initializeValues();
-
-        QGauss<dim>     quadFormula(fe.degree + 1);
-        FEValues<dim>   feValues(fe,
-                                 quadFormula,
-                                 update_values | 
-                                 update_JxW_values |
-                                 update_gradients);
-
-        std::vector<types::global_dof_index> 
-            local_dof_indices(fe.n_dofs_per_cell());
-
-        std::vector<double> cellValuesC(quadFormula.size());
-        std::vector<Tensor<1,dim>> cellGradEta(quadFormula.size());
-
-        Vector<double> temp(dofHandler.n_dofs());
-
-        for(; this->time < this->totalSimTime; ++this->timestepNumber)
-        {
-            this->time += this->timeStep;
-
-            std::cout   << "\rCurrent time: " << this->time << std::flush; 
-            std::cout   << "    Constructing RHS for eta^n" << std::endl;
-
-            // systemRightHandSideEta = AC^n
-            laplaceMatrix.vmult(systemRightHandSideEta, this->oldSolutionC);
-
-            this->systemRightHandSideEta *= pow(this->eps,2);
-
-            for(const auto &cell : this->dofHandler.active_cell_iterators())
+            for(uint i = 0; i < dofs_per_cell; i++)
             {
-                feValues.reinit(cell);
-                feValues.get_function_values(oldSolutionC,
-                                             cellValuesC);
-
-                cell->get_dof_indices(local_dof_indices);
-                for(const unsigned int qIndex : feValues.quadrature_point_indices())
+                
+                for(uint j = 0; j < dofs_per_cell; j++)
                 {
-                    double Cx = cellValuesC[qIndex];
+                    // (0,0): M
+                    local_matrix(i,j)
+                        +=  this->fe_values[phi].value(i,q_index)
+                        *   this->fe_values[phi].value(j,q_index)
+                        *   this->fe_values.JxW(q_index);
                     
-                    if (std::abs(Cx) > 2){
-                        std::cout << std::endl;
-                        std::cerr << "Value has fallen outside of viable range";
-                        std::cout << std::endl;
-                        assert(std::abs(Cx) <= 2);
-                    }
-                    for(const unsigned int i : feValues.dof_indices())
-                    {
-                        // systemRightHandSide -= (phi_i, F(C^n))
-                        // where F(C^n) = ( C^n (1 - (C^n)^2) )
-                        this->systemRightHandSideEta(local_dof_indices[i])
-                            += feValues.shape_value(i, qIndex) 
-                                * (Cx * (pow(Cx,2) - 1))
-                                * feValues.JxW(qIndex);
-                    }
-                }
-            }
-            
-            std::cout << "    Solving for eta^n" << std::endl;
-            solveEta();
-            
-            std::cout << "    Constructing RHS for c^{n+1}" << std::endl;
+                    // (0,1): kA
+                    local_matrix(i,j)
+                        +=  this->timestep 
+                        *   this->fe_values[phi].gradient(i,q_index)
+                        *   this->fe_values[eta].gradient(j,q_index)
+                        *   this->fe_values.JxW(q_index);
 
-            massMatrix.vmult(systemRightHandSideC, this->oldSolutionC);
+                    // (1,0): - (2 M + epsilon^2 A)
+                    local_matrix(i,j)
+                        -=  2.0 * this->fe_values[eta].value(i,q_index)
+                            * this->fe_values[phi].value(j,q_index)
+                            * this->fe_values.JxW(q_index);
 
-            for(const auto &cell : this->dofHandler.active_cell_iterators())
-            {
-                feValues.reinit(cell);
-
-                feValues.get_function_values(oldSolutionC,
-                                             cellValuesC);
-                feValues.get_function_gradients(solutionEta,
-                                                cellGradEta);
-
-                cell->get_dof_indices(local_dof_indices);
-                for(const unsigned int qIndex : feValues.quadrature_point_indices())
-                {
-                    double Cx       = cellValuesC[qIndex];
-                    auto GradEtaX   = cellGradEta[qIndex];
-
-                    for(const unsigned int i : feValues.dof_indices())
-                    {
-                        this->systemRightHandSideC(local_dof_indices[i])
-                            -= (feValues.shape_grad(i, qIndex)
-                                * (1-pow(Cx,2))
-                                * GradEtaX) * feValues.JxW(qIndex) * this->timeStep;
-                                
-                    }
-                }
-            }
-
-            std::cout << "    Solving for c^{n+1}" << std::endl;
-            solveC();
+                    local_matrix(i,j)
+                        -=  pow(this->eps,2)
+                            * this->fe_values[eta].gradient(i,q_index)
+                            * this->fe_values[phi].gradient(j,q_index)
+                            * this->fe_values.JxW(q_index); 
  
- 
+                    // (1,1): M
+                    local_matrix(i,j)
+                        +=  this->fe_values[eta].value(i,q_index)
+                            * this->fe_values[eta].value(j,q_index)
+                            * this->fe_values.JxW(q_index);
+                }
+                
+                // <\varphi_i, phi_old>
+                local_rhs(i)    +=  this->fe_values[phi].value(i,q_index)
+                                *   phi_old_x
+                                *   this->fe_values.JxW(q_index);
 
-            this->oldSolutionC = this->solutionC;
+                // 3 k <\nabla\varphi_i, \nabla\phi_old>
+                local_rhs(i)    +=  3.0 * this->timestep
+                                *   this->fe_values[phi].gradient(i,q_index)
+                                *   phi_old_x_grad 
+                                *   this->fe_values.JxW(q_index);
 
-            if (this->timestepNumber % 5 == 0){
+                // - k <\nabla\varphi_i, 3(\phi_old)^2 \nabla\phi_old>
+                local_rhs(i)    -=  this->timestep 
+                                *   (this->fe_values[phi].gradient(i,q_index)
+                                *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
+                                *   this->fe_values.JxW(q_index);
 
-                double maxC = *std::max_element(this->solutionC.begin(),
-                                                this->solutionC.end());
-                double minC = *std::min_element(this->solutionC.begin(),
-                                                this->solutionC.end());
-                double maxEta = *std::max_element(this->solutionEta.begin(),
-                                                  this->solutionEta.end());
-                double minEta = *std::min_element(this->solutionEta.begin(),
-                                                  this->solutionEta.end());
-
-                std::cout   << "    C Range: (" 
-                                << minC  << ", " 
-                                << maxC 
-                            << ")" << std::endl;
-                std::cout   << "    Eta Range: (" 
-                                << minEta  << ", " 
-                                << maxEta 
-                            << ")" << std::endl;
-                outputResults();
             }
-
         }
 
+        this->constraints.distribute_local_to_global(
+            local_matrix,
+            local_rhs,
+            local_dof_indices,
+            this->system_matrix,
+            this->system_rhs
+        );
     }
+
+    std::cout << "Assembly completed" << std::endl;
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: updateRHS()
+{
+
+    std::cout << "Updating RHS..." << std::endl;
+
+    const unsigned int dofs_per_cell = this->fe.n_dofs_per_cell();
+
+    this->system_rhs = 0;
+
+    FullMatrix<double>  local_matrix(
+        dofs_per_cell, 
+        dofs_per_cell
+    );
+    Vector<double>      local_rhs(dofs_per_cell);
+
+    std::vector<double>          cell_old_phi_values(this->quad_formula.size());
+    std::vector<Tensor<1,dim>>   cell_old_phi_grad(this->quad_formula.size());
+
+    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+    const FEValuesExtractors::Scalar    phi(0);
+    const FEValuesExtractors::Scalar    eta(1);
+
+    for(const auto &cell : dof_handler.active_cell_iterators())
+    {
+
+        this->fe_values.reinit(cell);
+        local_matrix    = 0;
+        local_rhs       = 0;
+
+        cell->get_dof_indices(local_dof_indices);
+
+       this->fe_values[phi].get_function_values(
+            this->solution_old,
+            cell_old_phi_values
+        ); 
+       this->fe_values[phi].get_function_gradients(
+            this->solution_old,
+            cell_old_phi_grad
+        ); 
+
+        for(uint q_index = 0 ;  q_index < this->quad_formula.size(); q_index++)
+        {   
+
+            double          phi_old_x       = cell_old_phi_values[q_index];
+            Tensor<1,dim>   phi_old_x_grad  = cell_old_phi_grad[q_index];
+
+            for(uint i = 0; i < dofs_per_cell; i++)
+            {
+                
+                // <\varphi_i, phi_old>
+                local_rhs(i)    +=  this->fe_values[phi].value(i,q_index)
+                                *   phi_old_x
+                                *   this->fe_values.JxW(q_index);
+
+                // 3 k <\nabla\varphi_i, \nabla\phi_old>
+                local_rhs(i)    +=  3.0 * this->timestep
+                                *   this->fe_values[phi].gradient(i,q_index)
+                                *   phi_old_x_grad 
+                                *   this->fe_values.JxW(q_index);
+
+                // - k <\nabla\varphi_i, 3(\phi_old)^2 \nabla\phi_old>
+                local_rhs(i)    -=  this->timestep 
+                                *   (this->fe_values[phi].gradient(i,q_index)
+                                *   3.0 * pow(phi_old_x,2) * phi_old_x_grad)
+                                *   this->fe_values.JxW(q_index);
+
+            }
+        }
+
+        this->constraints.distribute_local_to_global(
+            local_rhs,
+            local_dof_indices,
+            this->system_rhs
+        );
+
+    }
+
+    std::cout << "Update completed" << std::endl;
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: solveSystem()
+{
+
+    std::cout << "Solving system" << std::endl;
+
+    ReductionControl solverControlInner(2000, 1.0e-18, 1.0e-10);
+    SolverCG<Vector<double>>    solverInner(solverControlInner);
+
+    SolverControl               solverControlOuter(
+                                    10000,
+                                    1e-8 * this->system_rhs.l2_norm()
+                                );
+    SolverGMRES<
+        Vector<double>
+        >    solverOuter(solverControlOuter);
+    
+    // Decomposition of tangent matrix
+    const auto A = linear_operator(system_matrix.block(0,0));
+    const auto B = linear_operator(system_matrix.block(0,1));
+    const auto C = linear_operator(system_matrix.block(1,0));
+    const auto D = linear_operator(system_matrix.block(1,1));
+   
+    // Decomposition of solution vector
+    auto phi = solution.block(0);
+    auto eta = solution.block(1);
+    
+    // Decomposition of RHS vector
+    auto phi_rhs = system_rhs.block(0);
+    auto eta_rhs = system_rhs.block(1);
+    
+    auto phi_range = std::minmax_element(phi_rhs.begin(),
+                                         phi_rhs.end());
+    auto eta_range = std::minmax_element(eta_rhs.begin(),
+                                         eta_rhs.end());
+
+    std::cout   <<    "   Phi RHS range: (" 
+                << *phi_range.first << ", "
+                << *phi_range.second 
+                << ")" << std::endl;
+    std::cout   <<    "   Eta RHS range: (" 
+                << *eta_range.first << ", "
+                << *eta_range.second 
+                << ")" << std::endl;
+    
+    SparseILU<double> precon_A;
+    precon_A.initialize(system_matrix.block(0,0));
+
+    // Construction of inverse of Schur complement
+    const auto A_inv = inverse_operator(A, solverInner, precon_A);
+    const auto S = schur_complement(A_inv,B,C,D);
+     
+    const auto S_inv = inverse_operator(S, solverOuter, 
+                                        system_matrix.block(1,1));
+     
+    // Solve reduced block system
+    // PackagedOperation that represents the condensed form of g
+    auto rhs = condense_schur_rhs(A_inv,C, phi_rhs, eta_rhs);
+     
+    // Solve for y
+    eta = S_inv * rhs;
+
+    std::cout << "Solved inner problem..." << std::endl;
+     
+    // Compute x using resolved solution y
+    phi = postprocess_schur_solution (A_inv, B, eta, phi_rhs);
+
+    std::cout << "Solved outer problem..." << std::endl;
+
+    eta_range = std::minmax_element(eta.begin(),
+                                    eta.end());
+    phi_range = std::minmax_element(phi.begin(),
+                                    phi.end());
+
+    std::cout   <<    "   Phi range: (" 
+                << *phi_range.first << ", "
+                << *phi_range.second 
+                << ")" << std::endl;
+    std::cout   <<    "   Eta range: (" 
+                << *eta_range.first << ", "
+                << *eta_range.second 
+                << ")" << std::endl;
+
+    this->solution.block(0) = phi;
+    this->solution.block(1) = eta;
+    this->constraints.distribute(this->solution);
+    this->solution_old = this->solution;
+
+}
+
+template<int dim>
+void CahnHilliardEquation<dim> :: outputResults() const
+{
+
+    DataOut<dim> dataOut;
+
+    std::vector<DataComponentInterpretation::DataComponentInterpretation>
+        interpretation(2,DataComponentInterpretation::component_is_scalar);
+    std::vector<std::string> solution_names = {"phi", "eta"};
+    std::vector<std::string> rhs_names = {"phi_rhs", "eta_rhs"};
+    std::vector<std::string> old_names = {"phi_old", "eta_old"};
+
+    dataOut.add_data_vector(this->dof_handler,
+                            this->solution,
+                            solution_names,
+                            interpretation);
+    dataOut.add_data_vector(this->dof_handler,
+                            this->solution_old,
+                            old_names,
+                            interpretation);
+    dataOut.add_data_vector(this->dof_handler,
+                            this->system_rhs,
+                            rhs_names,
+                            interpretation);
+    dataOut.build_patches(this->degree+1);
+
+    const std::string filename = ("data/solution-" 
+                                 + std::to_string(this->timestep_number) 
+                                 + ".vtu");
+
+    DataOutBase::VtkFlags vtk_flags;
+    vtk_flags.compression_level = DataOutBase
+        ::VtkFlags
+        ::ZlibCompressionLevel
+        ::best_speed;
+    dataOut.set_flags(vtk_flags);
+
+    std::ofstream output(filename);
+    dataOut.write_vtu(output);
+
+};
+
+template<int dim> 
+void CahnHilliardEquation<dim> :: run(
+    const std::unordered_map<std::string, double> params,
+    const double                                  totalSimTime
+)
+{
+    this->setupSystem(params, totalSimTime);
+    this->initializeValues();
+
+    this->assembleSystem();
+    this->solveSystem();
+    this->outputResults();
+    
+    for(uint i = 0; i < 10000; i++)
+    {   
+        this->timestep_number++;
+        this->updateRHS();
+        this->solveSystem();
+        this->outputResults();
+    }
+}
 
 }
 
@@ -512,8 +729,8 @@ int main(){
 
     double totalSimTime = 10;
 
-    cahnHilliard::CahnHilliardEquation<2> cahnHilliard(params, totalSimTime);
-    cahnHilliard.run();
+    cahnHilliard::CahnHilliardEquation<2> cahnHilliard;
+    cahnHilliard.run(params, totalSimTime);
 
     std::cout << "Completed" << std::endl;
 
